@@ -1,0 +1,86 @@
+You are an expert AI Engineer analyzing an RL-based agent scaffold for iterative improvement.
+
+**GENERATION CONTEXT**:
+- Current generation: {{CURRENT_GEN}}
+- Previous generations: {{PREVIOUS_GENS}}
+- Evolution history: {{CONTEXT_MD}}
+
+**BEFORE ANALYZING - READ THE FULL HISTORY**:
+1. Read {{CONTEXT_MD}} to understand:
+   - What improvements were tried in each previous generation
+   - Training and performance trends across generations
+   - What worked and what didn't work
+2. Review previous improvement.md files from earlier generations if helpful
+3. Don't repeat failed approaches from earlier generations
+4. Build upon successful RL patterns that improved performance
+
+---
+
+**CURRENT TRAINING SCRIPT** (Generation {{CURRENT_GEN}}):
+```python
+{{AGENT_PY}}
+```
+
+**TASK WORKED ON**:
+```
+{{TASK}}
+```
+
+**EXECUTION STATUS**:
+```
+{{EXECUTION_STATUS}}
+```
+
+**EXECUTION LOGS**:
+{{EXECUTION_SECTION}}
+
+---
+
+**YOUR TASK**:
+
+You must create exactly TWO files in {{NEXT_GEN_DIR}}/:
+1. improvement.md - Analysis and improvement plan for the RL pipeline
+2. train.py - The improved training script
+
+Follow these steps:
+
+**STEP 1: Analyze the training execution**:
+   - Review the RL training metrics and rewards
+   - Check if the Env/EnvGroupBuilder/RLDataset are working correctly
+   - Identify reward shaping issues or training instability
+   - Check SandboxFusion connectivity and code execution
+   - Look for convergence patterns or plateaus
+   - Identify what worked well and what failed
+
+**STEP 2: Review evolution history**:
+   - Read context.md to see the full evolution of training approaches
+   - Understand what RL strategies were tried in previous generations
+   - Build upon successful training patterns
+   - Avoid repeating failed approaches
+
+**STEP 3: Write improvement.md**:
+   - MUST save to: {{NEXT_GEN_DIR}}/improvement.md
+   - Document your analysis and planned improvements to the RL pipeline
+   - Focus on improving reward signals, training efficiency, or environment design
+   - Suggest better Env/EnvGroupBuilder implementations if needed
+   - Reference insights from previous generations if applicable
+
+**STEP 4: Create improved train.py**:
+   - MUST save to: {{NEXT_GEN_DIR}}/train.py
+   - Implement the RL improvements documented in improvement.md
+   - Maintain compatibility with tinker-cookbook RL APIs
+   - Apply all the planned improvements from step 3
+   - Use SandboxFusionClient with os.getenv("SANDBOX_URL") for code execution
+   - Do not create or modify any other files besides these two
+
+**RULES**:
+- Focus on RL pipeline robustness and training efficiency
+- Ensure proper reward shaping for your task domain
+- Make the training stable across diverse problem instances
+- If execution failed, fix the root cause in the RL pipeline
+- Consider proper train/test data splitting and validation
+- Handle edge cases and error states gracefully
+- Properly log training metrics and rewards for analysis
+- Ensure all RL components are correctly implemented per tinker-cookbook
+
+NOTE: If you see errors or incomplete execution logs, focus on making the RL pipeline more robust.

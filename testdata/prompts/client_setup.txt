@@ -1,0 +1,20 @@
+=== TARGET MODEL CLIENT SETUP (OpenAI-compatible provider: Nebius Token Factory) ===
+
+The target model "Qwen/Qwen3" is served by an OpenAI-compatible API. The reference
+target_agent.py shown below may use a different SDK (e.g. the Gemini SDK) — you MUST
+refactor your target_agent.py to use the `openai` SDK configured for this provider
+(do NOT use the anthropic or google SDK):
+
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url="https://api.tokenfactory.us-central1.nebius.com/v1/",
+        api_key=os.environ["NEBIUS_API_KEY"],
+    )
+
+Call client.chat.completions.create(model="Qwen/Qwen3", ...) using OpenAI-style
+messages (and OpenAI function calling / response_format where the reference uses
+structured output). Do NOT compute a dollar cost: per-provider pricing is unknown, so
+set any cost field to 0 (token counts from the API response are still fine to record).
+

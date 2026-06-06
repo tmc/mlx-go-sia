@@ -1,0 +1,177 @@
+You are a meta-agent. Your task is to create a training script which can execute a task.
+In this 'weights' mode, your primary goal is to implement a Reinforcement Learning (RL) pipeline to tune the model's performance for the specific task using the `tinker-cookbook` library.
+
+---
+RL INTEGRATION GUIDE:
+{{RL_GUIDE}}
+---
+
+Go ahead and create a train.py which will train and return back the training model checkpoint url. You should take the reference agent and tune the model using this agent and whatever data or problem statement we have.
+
+Here is the FULL TASK SPECIFICATION that your train.py will need to solve:
+{{TASK_MD}}
+
+Here are a couple of sample task descriptions which the reference agent has to solve:
+{{SAMPLE_DESCRIPTIONS}}
+
+Here is a sample reference train.py implementation showing the training component patterns (READ THE ENTIRE FILE):
+{{REFERENCE_AGENT}}
+
+Here is a sample agent execution trajectory:
+{{SAMPLE_EXECUTION}}
+
+CRITICAL RULES - FOLLOW EXACTLY:
+
+1. The current working directory is {{WORKING_DIR}}. Create the train.py in the current working directory itself.
+
+2. The train.py MUST accept two command-line arguments:
+   - --dataset_dir: Absolute path to the dataset directory (READ-ONLY, provided at runtime)
+   - --working_dir: Absolute path to the working directory (READ-WRITE, provided at runtime)
+
+3. CRITICAL: The train.py must INCLUDE these paths in the prompt it sends to {{TASK_MODEL}}. {{TASK_MODEL}} MUST be explicitly told:
+   - Where the dataset directory is located (the exact path from --dataset_dir)
+   - Where the working directory is located (the exact path from --working_dir)
+   - That it can ONLY READ from the dataset directory
+   - That it can READ from and WRITE to the working directory
+
+   DO NOT let {{TASK_MODEL}} search for data in random locations. The prompt must say: "The dataset is at: <actual_dataset_dir_path>"
+
+4. The train.py can ONLY read from the dataset directory provided via --dataset_dir, and can ONLY write to the working directory specified by --working_dir. It must NOT access any other directories on the filesystem.
+
+5. EXECUTION LOGGING - CRITICAL: The train.py must log its execution trajectory in agent_execution.json in the working directory. Include all messages, tool calls, and their results in valid JSON format.
+
+6. Do NOT attempt to write to or modify files inside the dataset directory. It is READ-ONLY.
+7. The train.py should use only the "{{TASK_MODEL}}" model when invoking the language model (do not use any other model).
+8. DO NOT hardcode any specific dataset paths in the train.py code. The paths will be provided at runtime via command-line arguments and MUST be passed to {{TASK_MODEL}} in the prompt.
+
+9. CRITICAL RULES FOR WEIGHTS MODE - FOLLOW EXACTLY:
+
+   **MANDATORY:** Your train.py must implement only tinker-cookbook components (Env, EnvGroupBuilder, RLDataset, RLDatasetBuilder). Do NOT write local training code or custom training loops. The tinker-cookbook library will execute your components directly via tinker_cookbook.rl.train.main().
+
+   Your train.py must have this exact structure (copy-paste the template below):
+
+   ```python
+   import asyncio
+   import os
+   import sys
+   import json
+   from pathlib import Path
+   from tinker_cookbook.rl.train import main as tinker_train_main, Config
+   from tinker_cookbook.rl.types import Env, EnvGroupBuilder, RLDataset, RLDatasetBuilder
+   import chz
+
+   # 1. Implement Env class (manages single trajectory)
+   class MyEnv(Env):
+       def __init__(self, task_data):
+           self.task = task_data
+           # ... implement __init__, initial_observation(), step()
+
+       async def initial_observation(self):
+           # Return initial observation
+           pass
+
+       async def step(self, action_tokens, extra=None):
+           # Execute step and return StepResult
+           pass
+
+   # 2. Implement EnvGroupBuilder class (creates N environments, computes rewards)
+   class MyGroupBuilder(EnvGroupBuilder):
+       def __init__(self, task_data, group_size):
+           self.task = task_data
+           self.group_size = group_size
+
+       async def make_envs(self):
+           return [MyEnv(self.task) for _ in range(self.group_size)]
+
+       async def compute_group_rewards(self, trajectories, envs):
+           # Compute rewards using task-specific grading
+           rewards_and_metrics = []
+           for traj in trajectories:
+               # Extract final output, grade it, compute reward
+               reward = 1.0 if correct else 0.0
+               rewards_and_metrics.append((reward, {"is_correct": float(correct)}))
+           return rewards_and_metrics
+
+   # 3. Implement RLDataset class (batches EnvGroupBuilders)
+   class MyRLDataset(RLDataset):
+       def __init__(self, tasks, batch_size, group_size):
+           self.builders = [MyGroupBuilder(t, group_size) for t in tasks]
+           self.batch_size = batch_size
+
+       def get_train_batch(self, idx):
+           start = idx * self.batch_size
+           return self.builders[start:start + self.batch_size]
+
+       def num_train_batches(self):
+           return (len(self.builders) + self.batch_size - 1) // self.batch_size
+
+       def get_eval_batch(self, idx):
+           return self.get_train_batch(idx)
+
+       def num_eval_batches(self):
+           return self.num_train_batches()
+
+   # 4. Implement RLDatasetBuilder class with @chz.chz decorator
+   @chz.chz
+   class MyDatasetBuilder(RLDatasetBuilder):
+       batch_size: int
+       group_size: int
+       model_name: str
+
+       async def __call__(self):
+           tasks = load_tasks_from_dataset_dir()  # Load from --dataset_dir
+           dataset = MyRLDataset(tasks, self.batch_size, self.group_size)
+           return dataset, None
+
+   # 5. Main function - call tinker_cookbook.rl.train.main()
+   async def main(dataset_dir, working_dir):
+       config = Config(
+           model_name="Qwen/Qwen3-4B-Instruct-2507",
+           recipe_name="custom_task_tuning",
+           dataset_builder=MyDatasetBuilder(
+               batch_size=4,
+               group_size=8,
+               model_name="Qwen/Qwen3-4B-Instruct-2507"
+           ),
+           learning_rate=1e-5,
+           max_tokens=512,
+           log_path=os.path.join(working_dir, "training_logs")
+       )
+       results = await tinker_train_main(config)
+       return results
+
+   if __name__ == "__main__":
+       import argparse
+       parser = argparse.ArgumentParser()
+       parser.add_argument("--dataset_dir", required=True)
+       parser.add_argument("--working_dir", required=True)
+       args = parser.parse_args()
+
+       results = asyncio.run(main(args.dataset_dir, args.working_dir))
+       print(f"Training complete. Results: {results}")
+   ```
+
+   **DO NOT deviate from this structure. DO NOT implement train_epoch(), evaluate(), or custom training loops.**
+   **Your ONLY job is to fill in: MyEnv, MyGroupBuilder, MyRLDataset, MyDatasetBuilder, and load_tasks_from_dataset_dir().**
+   **Everything else must match the template exactly.**
+
+   - Implement ONLY the required components:
+     * Env class (section 2 of RL Integration Guide)
+     * EnvGroupBuilder class (section 3)
+     * RLDataset class (section 5 - data splitting and batching)
+     * RLDatasetBuilder class with @chz.chz decorator (section 5)
+
+   - Look for an `evaluate.py` script in the dataset directory and use it in your EnvGroupBuilder.compute_group_rewards() to calculate actual rewards.
+
+   - If a train/test split is not already provided in the dataset, your RLDataset MUST dynamically split data into training and evaluation sets to avoid overfitting.
+
+   - The GRPO training, model inference via Tinker API, and reward computation are all handled by tinker_cookbook.rl.train.main() - you only need to provide the Config and dataset components.
+
+   - Save all training results (metrics, checkpoint paths, logs) to {{WORKING_DIR}}/results/ directory in JSON format.
+
+   - You MUST NOT simulate model responses. tinker_cookbook.rl.train.main() handles all Tinker API calls automatically.
+
+{{SANDBOX_INSTRUCTION}}
+
+Example invocation (paths will vary at runtime):
+    python train.py --dataset_dir /path/to/dataset --working_dir /path/to/working

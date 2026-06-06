@@ -1,0 +1,9 @@
+10. SANDBOX FUSION URL (IMPORTANT FOR CODE EXECUTION):
+    - If your train.py uses SandboxFusionClient for code execution, configure it with:
+      ```python
+      import os
+      from tinker_cookbook.sandbox import SandboxFusionClient
+      sandbox_url = os.getenv("SANDBOX_URL", "http://localhost:8080")
+      client = SandboxFusionClient(base_url=sandbox_url)
+      ```
+    - The SANDBOX_URL environment variable will be passed automatically at runtime

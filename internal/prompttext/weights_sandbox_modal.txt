@@ -1,0 +1,15 @@
+10. MODAL CONFIGURATION (IMPORTANT FOR CODE EXECUTION):
+    - Use Modal SDK (https://modal.com) as the default sandbox for executing code in your RL pipeline
+    - For code execution in your RL components, use Modal Functions with @modal.function decorator
+    - Modal provides better reliability, isolation, and scaling compared to alternatives
+    - Example:
+      ```python
+      import modal
+      app = modal.App("training-app")
+
+      @app.function()
+      def execute_code(code: str) -> str:
+          exec(code)
+          return result
+      ```
+    - Ensure MODAL_TOKEN_ID and MODAL_TOKEN_SECRET are set in the environment (automatically available)
