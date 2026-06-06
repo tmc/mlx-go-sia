@@ -2,3 +2,9 @@ github.com/ebitengine/purego v0.10.0 h1:QIw4xfpWT6GWTzaW5XEKy3HXoqrJGx1ijYHzTF0/
 github.com/ebitengine/purego v0.10.0/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+github.com/tmc/modelir v0.1.2-0.20260517090425-24c01509645e h1:YNhOIrH4NoERHiq2Vc+9PCP7HGXt4QM8z0SaiIsOAcg=
+github.com/tmc/modelir v0.1.2-0.20260517090425-24c01509645e/go.mod h1:vqTK5bCw/e1vPpNLAaOMVdAfVCUCc0vDNJKAK/qFG2k=
+golang.org/x/image v0.38.0 h1:5l+q+Y9JDC7mBOMjo4/aPhMDcxEptsX+Tt3GgRQRPuE=
+golang.org/x/image v0.38.0/go.mod h1:/3f6vaXC+6CEanU4KJxbcUZyEePbyKbaLoDOe4ehFYY=
+rsc.io/omap v1.2.0 h1:c1M8jchnHbzmJALzGLclfH3xDWXrPxSUHXzH5C+8Kdw=
+rsc.io/omap v1.2.0/go.mod h1:C8pkI0AWexHopQtZX+qiUeJGzvc8HkdgnsWK4/mAa00=
