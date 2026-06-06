@@ -1,0 +1,11 @@
+# Compiled "sia" command binary (go build output at module root).
+# Other cmd binaries share names with source dirs, so they are not listed
+# here; rely on explicit staging rather than `git add -A` to avoid them.
+/sia
+
+# Test/coverage artifacts
+*.test
+*.out
+
+# Generation run trees (SIA orchestrator output)
+/runs/
