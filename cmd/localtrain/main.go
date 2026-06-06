@@ -53,6 +53,7 @@ func run(argv []string) error {
 		engine    = fs.String("engine", "", "offline engine: \"pi\" for pi-mlx; empty uses -agent-cmd or a no-op")
 		agentCmd  = fs.String("agent-cmd", "", "external agent CLI for the meta/feedback engine (e.g. claude)")
 		agentArgs = fs.String("agent-args", "", "comma-separated args for -agent-cmd; %MODEL%/%MAXTURNS%/%WORKDIR% substituted")
+		piScript  = fs.String("pi-script", "", "pi-mlx wrapper path for -engine pi (empty auto-detects scripts/pi-mlx, else PATH)")
 		trainBin  = fs.String("train-bin", "mlx-lm-train", "mlx-lm-train executable")
 		dryRun    = fs.Bool("dry-run", true, "scaffold + wire but skip GPU training/eval (default; the safe self-test)")
 	)
@@ -69,10 +70,19 @@ func run(argv []string) error {
 	// Data lives in two separated trees:
 	//   _data       — train/valid, given to the agent's training executor.
 	//   _heldout    — read-only test.jsonl, the evaluator's only; never the agent's.
+	// Both must be ABSOLUTE: the executor runs mlx-lm-train with cmd.Dir set to
+	// the generation's working directory, so a relative -data path would resolve
+	// against the gen dir and fail ("could not find data file 'train'").
 	dataDir := filepath.Join(*runsRoot, "_data", fmt.Sprintf("run_%d", *runID))
 	heldOutDir := filepath.Join(*runsRoot, "_heldout", fmt.Sprintf("run_%d", *runID))
 	if err := scaffoldData(dataDir, heldOutDir); err != nil {
 		return fmt.Errorf("scaffold data: %w", err)
+	}
+	if dataDir, err = filepath.Abs(dataDir); err != nil {
+		return fmt.Errorf("resolve data dir: %w", err)
+	}
+	if heldOutDir, err = filepath.Abs(heldOutDir); err != nil {
+		return fmt.Errorf("resolve held-out dir: %w", err)
 	}
 
 	taskLayout, resolved, taskFiles, err := scaffoldTask(filepath.Join(*runsRoot, "_taskroot", fmt.Sprintf("run_%d", *runID)))
@@ -80,7 +90,7 @@ func run(argv []string) error {
 		return fmt.Errorf("scaffold task: %w", err)
 	}
 
-	meta, engineName, err := buildEngine(*engine, *agentCmd, *agentArgs)
+	meta, engineName, err := buildEngine(*engine, *agentCmd, *agentArgs, *piScript)
 	if err != nil {
 		return err
 	}
@@ -154,10 +164,19 @@ func run(argv []string) error {
 
 // buildEngine selects the meta/feedback engine: offline pi-mlx, an external CLI,
 // or a no-op so the dry-run self-test produces a real (untrained) gen-0.
-func buildEngine(engine, agentCmd, agentArgs string) (sia.AgentRunner, string, error) {
+func buildEngine(engine, agentCmd, agentArgs, piScript string) (sia.AgentRunner, string, error) {
 	switch {
 	case engine == "pi":
-		return sia.NewPiRunner(""), "pi-mlx", nil
+		runner := sia.NewPiRunner("")
+		// The pi-mlx wrapper runs in each generation's WorkingDir, so the script
+		// path must be absolute. Honor -pi-script, else the repo's scripts/pi-mlx
+		// (not installed on PATH), else fall back to the bare PATH name.
+		if script, err := resolvePiScript(piScript); err != nil {
+			return nil, "", err
+		} else if script != "" {
+			runner.Script = script
+		}
+		return runner, "pi-mlx", nil
 	case engine != "":
 		return nil, "", fmt.Errorf("unknown -engine %q (want \"pi\" or empty)", engine)
 	case agentCmd != "":
@@ -166,6 +185,32 @@ func buildEngine(engine, agentCmd, agentArgs string) (sia.AgentRunner, string, e
 		log.Print("no -engine/-agent-cmd: no-op engine (the seed train.py spec is used as-is)")
 		return sia.FuncRunner{ImplName: "noop", Fn: func(context.Context, sia.AgentRequest) error { return nil }}, "noop", nil
 	}
+}
+
+// resolvePiScript returns the absolute pi-mlx wrapper path to use. An explicit
+// path is made absolute and must exist. Empty auto-detects the repository's
+// scripts/pi-mlx; if missing it returns "" so the runner falls back to the bare
+// DefaultPiScript on PATH.
+func resolvePiScript(explicit string) (string, error) {
+	if explicit != "" {
+		abs, err := filepath.Abs(explicit)
+		if err != nil {
+			return "", fmt.Errorf("resolve -pi-script: %w", err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return "", fmt.Errorf("-pi-script %q: %w", explicit, err)
+		}
+		return abs, nil
+	}
+	for _, rel := range []string{"scripts/pi-mlx", "../../scripts/pi-mlx"} {
+		if abs, err := filepath.Abs(rel); err == nil {
+			if _, statErr := os.Stat(abs); statErr == nil {
+				log.Printf("pi-mlx: using repo wrapper %s (not on PATH)", abs)
+				return abs, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 func splitArgs(s string) []string {

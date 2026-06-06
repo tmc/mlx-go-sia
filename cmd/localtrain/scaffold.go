@@ -29,9 +29,13 @@ var dataset = struct{ train, valid, test []sample }{
 		{"It was a complete waste of my money.", "negative"},
 		{"The app crashes every time I open it.", "negative"},
 	},
+	// Validation needs at least batch_size examples (the seed spec uses 2), so
+	// keep at least four here to leave headroom for a slightly larger batch.
 	valid: []sample{
 		{"A delightful little cafe with great coffee.", "positive"},
 		{"The flight was delayed and the seats were cramped.", "negative"},
+		{"The team delivered exactly what they promised.", "positive"},
+		{"Nothing about this lived up to the hype.", "negative"},
 	},
 	// Held-out: never seen during training; the evaluator scores generalization.
 	test: []sample{
@@ -148,7 +152,7 @@ learning_rate = 1e-5
 lora_rank = 8
 num_layers = 16
 iters = 100
-batch_size = 4
+batch_size = 2
 fine_tune_type = "lora"
 `
 

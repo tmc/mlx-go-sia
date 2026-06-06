@@ -50,9 +50,10 @@ func run(argv []string) error {
 		runID     = fs.Int("run-id", 1, "unique run identifier")
 		maxGen    = fs.Int("max-gen", 6, "number of self-improvement generations (P3: 5-8)")
 		maxTurns  = fs.Int("max-turns", 30, "engine turn budget per invocation")
-		engine    = fs.String("engine", "", "offline engine: \"pi\" for pi-mlx; empty uses -agent-cmd or a no-op")
+		engine    = fs.String("engine", "", "engine: \"pi\" (pi-mlx), \"scripted\" (deterministic verified-optimizer fallback); empty uses -agent-cmd or a no-op")
 		agentCmd  = fs.String("agent-cmd", "", "external agent CLI for the meta/feedback engine (e.g. claude)")
 		agentArgs = fs.String("agent-args", "", "comma-separated args for -agent-cmd; %MODEL%/%MAXTURNS%/%WORKDIR% are substituted")
+		piScript  = fs.String("pi-script", "", "pi-mlx wrapper path for -engine pi (empty auto-detects scripts/pi-mlx, else PATH)")
 		model     = fs.String("model", "", "model the engine drives (empty uses the engine default)")
 		runs      = fs.Int("bench-runs", 5, "median-of-N timing runs per generation")
 		steps     = fs.Int("steps", 256, "decode steps in the fixtures (sequence length to sample)")
@@ -98,7 +99,7 @@ func run(argv []string) error {
 		return fmt.Errorf("scaffold task: %w", err)
 	}
 
-	meta, engineName, err := buildEngine(*engine, *agentCmd, *agentArgs)
+	meta, engineName, err := buildEngine(*engine, *agentCmd, *agentArgs, *piScript)
 	if err != nil {
 		return err
 	}
@@ -148,10 +149,22 @@ func run(argv []string) error {
 // buildEngine selects the meta/feedback engine: the offline pi-mlx wrapper, an
 // external agent CLI, or — when neither is given — a no-op runner so the loop
 // still produces a seed-only baseline run for a self-test.
-func buildEngine(engine, agentCmd, agentArgs string) (sia.AgentRunner, string, error) {
+func buildEngine(engine, agentCmd, agentArgs, piScript string) (sia.AgentRunner, string, error) {
 	switch {
+	case engine == "scripted":
+		return newScriptedImprover(), "scripted", nil
 	case engine == "pi":
-		return sia.NewPiRunner(""), "pi-mlx", nil
+		runner := sia.NewPiRunner("")
+		// The pi-mlx wrapper runs in each generation's WorkingDir, so the script
+		// path must be absolute. Honor an explicit -pi-script, else use the
+		// repo's scripts/pi-mlx when present (it is not installed on PATH), else
+		// fall back to the bare PATH name.
+		if script, err := resolvePiScript(piScript); err != nil {
+			return nil, "", err
+		} else if script != "" {
+			runner.Script = script
+		}
+		return runner, "pi-mlx", nil
 	case engine != "":
 		return nil, "", fmt.Errorf("unknown -engine %q (want \"pi\" or empty)", engine)
 	case agentCmd != "":
@@ -160,6 +173,33 @@ func buildEngine(engine, agentCmd, agentArgs string) (sia.AgentRunner, string, e
 		log.Print("no -engine/-agent-cmd: running seed-only (no-op engine); gen-0 baseline still graded")
 		return sia.FuncRunner{ImplName: "noop", Fn: func(context.Context, sia.AgentRequest) error { return nil }}, "noop", nil
 	}
+}
+
+// resolvePiScript returns the absolute pi-mlx wrapper path to use. An explicit
+// path is made absolute and must exist. Empty auto-detects the repository's
+// scripts/pi-mlx (relative to this command's source tree); if that is missing it
+// returns "" so the runner falls back to the bare DefaultPiScript on PATH.
+func resolvePiScript(explicit string) (string, error) {
+	if explicit != "" {
+		abs, err := filepath.Abs(explicit)
+		if err != nil {
+			return "", fmt.Errorf("resolve -pi-script: %w", err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return "", fmt.Errorf("-pi-script %q: %w", explicit, err)
+		}
+		return abs, nil
+	}
+	// cmd/inferopt → repo root is two levels up; scripts/pi-mlx sits there.
+	for _, rel := range []string{"scripts/pi-mlx", "../../scripts/pi-mlx"} {
+		if abs, err := filepath.Abs(rel); err == nil {
+			if _, statErr := os.Stat(abs); statErr == nil {
+				log.Printf("pi-mlx: using repo wrapper %s (not on PATH)", abs)
+				return abs, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // splitArgs splits a comma-separated argument list, trimming spaces and dropping

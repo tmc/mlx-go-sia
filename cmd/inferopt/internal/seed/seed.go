@@ -14,3 +14,12 @@ import _ "embed"
 //
 //go:embed candidate.go.txt
 var Candidate string
+
+// Optimized is a faster, token-identical rewrite of the seed sampler: it removes
+// the two full-vocabulary sorts and the per-step allocations while reproducing
+// the exact algorithm, tie-breaks, and RNG. The scripted-improver engine writes
+// it as a verified throughput win when no capable LLM meta-agent is wired, for an
+// honest, reproducible "number goes up" series.
+//
+//go:embed optimized.go.txt
+var Optimized string
