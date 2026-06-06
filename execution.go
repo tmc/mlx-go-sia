@@ -45,7 +45,7 @@ func LoadExecution(genDir string, maxLogSize int64) Execution {
 		return loadMultiTrajectory(execDir, maxLogSize)
 	}
 	if isFile(execFile) {
-		return Execution{Single: loadOneTrajectory(execFile, maxLogSize)}
+		return Execution{Single: loadSingleTrajectory(execFile, maxLogSize)}
 	}
 	return Execution{Single: errorObject(map[string]any{"error": "Execution log not found"})}
 }
@@ -61,14 +61,50 @@ func loadMultiTrajectory(execDir string, maxLogSize int64) Execution {
 	}
 	trajectories := make([]json.RawMessage, 0, len(matches))
 	for _, f := range matches {
-		trajectories = append(trajectories, loadOneTrajectory(f, maxLogSize))
+		trajectories = append(trajectories, loadMultiOneTrajectory(f, maxLogSize))
 	}
 	return Execution{MultiTrajectory: true, Trajectories: trajectories}
 }
 
-// loadOneTrajectory reads and validates one trajectory file, returning the raw
-// JSON on success or an error object describing the failure.
-func loadOneTrajectory(path string, maxLogSize int64) json.RawMessage {
+// loadSingleTrajectory reads the single agent_execution.json, returning the raw
+// JSON on success or the reference's exact single-file error shape: an oversized
+// file is {"error":"File too large","size":N}; a malformed file is
+// {"error":"Parse error","raw_preview":...,"parse_error":...,"file_size":N}; an
+// unreadable file is {"error":"Could not read file","read_error":...}. These
+// shapes (no "file" key) match orchestrator.py load_agent_execution and the
+// characterization in tests/test_load_execution_formats.py.
+func loadSingleTrajectory(path string, maxLogSize int64) json.RawMessage {
+	info, err := os.Stat(path)
+	if err != nil {
+		return errorObject(map[string]any{"error": "Could not read file", "read_error": err.Error()})
+	}
+	if maxLogSize > 0 && info.Size() > maxLogSize {
+		return errorObject(map[string]any{"error": "File too large", "size": info.Size()})
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return errorObject(map[string]any{"error": "Could not read file", "read_error": err.Error()})
+	}
+	if perr := jsonParseError(data); perr != "" {
+		preview := data
+		if len(preview) > 1000 {
+			preview = preview[:1000]
+		}
+		return errorObject(map[string]any{
+			"error":       "Parse error",
+			"raw_preview": string(preview),
+			"parse_error": perr,
+			"file_size":   len(data),
+		})
+	}
+	return json.RawMessage(data)
+}
+
+// loadMultiOneTrajectory reads one per-sample execution_q*.json. Its error
+// shapes match the reference's multi-trajectory branch: an oversized file is
+// {"error":"File too large","file":base,"size":N}; any read/parse failure is
+// {"error":<message>,"file":base} (the raw error string, no preview).
+func loadMultiOneTrajectory(path string, maxLogSize int64) json.RawMessage {
 	base := filepath.Base(path)
 	info, err := os.Stat(path)
 	if err != nil {
@@ -81,19 +117,20 @@ func loadOneTrajectory(path string, maxLogSize int64) json.RawMessage {
 	if err != nil {
 		return errorObject(map[string]any{"error": err.Error(), "file": base})
 	}
-	if !json.Valid(data) {
-		preview := data
-		if len(preview) > 1000 {
-			preview = preview[:1000]
-		}
-		return errorObject(map[string]any{
-			"error":       "Parse error",
-			"file":        base,
-			"raw_preview": string(preview),
-			"file_size":   len(data),
-		})
+	if perr := jsonParseError(data); perr != "" {
+		return errorObject(map[string]any{"error": perr, "file": base})
 	}
 	return json.RawMessage(data)
+}
+
+// jsonParseError returns a parse-error message if data is not valid JSON, or ""
+// if it parses. It mirrors the role of Python's json.JSONDecodeError string.
+func jsonParseError(data []byte) string {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 // errorObject marshals a diagnostic map into a json.RawMessage. The map is
