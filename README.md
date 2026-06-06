@@ -130,3 +130,40 @@ rule, and the prompt text), not a byte-for-byte runtime clone. The agent engine,
 target interpreter, and evaluator are abstracted behind interfaces so the loop
 runs without a Python runtime. The prompt builders are checked byte-for-byte
 against fixtures generated from the reference.
+
+## Weights mode: local training data (post-hoc)
+
+The reference's weights mode never tokenizes trajectories itself: the
+orchestrator drops the raw trajectory JSON into the feedback prompt as text, and
+in weights mode it emits a prompt instructing the *generated* `train.py` to
+build a renderer with `tinker_cookbook` and train against the hosted Tinker
+service. The `traindata` and `localtrain` packages provide a Go-native,
+hosted-Tinker-free analog of that delegated pipeline. They are **additive**:
+nothing in the orchestration core changes, and `package sia`'s import graph stays
+dependency-free — the renderer/tinker edge lives only in these subpackages and
+their commands.
+
+- `traindata` renders a recorded `sia.Execution` into token-level
+  `(token_ids, loss_mask)` samples via the target model's
+  [renderer](https://github.com/tmc/mlx-go-experiments/tree/main/renderer), and
+  writes them as JSONL — the line-delimited form a `train.py` reads.
+- `localtrain` maps those samples onto the
+  [localtinker](https://github.com/tmc/localtinker) `tinker.Datum` contract and
+  runs `CreateLoRA → ForwardBackward → OptimStep → Save` against a local
+  coordinator on MLX.
+
+```sh
+# 1. Render a finished run's trajectories into training data.
+sia-traindata -run-dir ./runs/run_1 -all \
+    -model Qwen/Qwen3-8B -tokenizer /models/Qwen3-8B -mask rl
+
+# 2. Train a LoRA locally against a running localtinker coordinator.
+#    (in another shell: localtinker serve -addr 127.0.0.1:8080 -home /tmp/lt-home)
+sia-tinker-train -data ./runs/run_1/gen_3/train_data.jsonl \
+    -base-model Qwen/Qwen3-8B -model-path /models/Qwen3-8B -rank 8
+```
+
+This is one of two coexisting weights-mode backends: `sia-tinker-train` drives
+the renderer→tinker path above, while `sia-train` drives a separate
+declarative-spec path that translates the generated `train.py` into
+`mlx-lm-train` flags. The `train_data.jsonl` from `sia-traindata` feeds either.
