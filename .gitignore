@@ -9,3 +9,6 @@
 
 # Generation run trees (SIA orchestrator output)
 /runs/
+# localtrain weight-loop run trees + held-out splits (hold trained LoRA
+# adapters.safetensors, which must never be staged).
+/runs-localtrain/
