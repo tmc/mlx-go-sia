@@ -1,0 +1,6 @@
+[
+  {"role": "user", "content": "Compute 3 times 7."},
+  {"role": "assistant", "reasoning_content": "3 * 7 = 21", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "mul", "arguments": "{\"a\":3,\"b\":7}"}}]},
+  {"role": "tool", "tool_call_id": "c1", "name": "mul", "content": "21"},
+  {"role": "assistant", "content": "The product is 21."}
+]

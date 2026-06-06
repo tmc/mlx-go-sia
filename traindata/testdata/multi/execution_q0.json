@@ -1,0 +1,4 @@
+[
+  {"role": "user", "content": "Name a primary color."},
+  {"role": "assistant", "content": "Red is a primary color."}
+]
