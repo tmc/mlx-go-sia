@@ -50,7 +50,7 @@ func run(argv []string) error {
 		maxGen    = fs.Int("max-gen", 2, "generations (P6: small, 1-2 — training is slow/thermal)")
 		maxTurns  = fs.Int("max-turns", 20, "engine turn budget per invocation")
 		model     = fs.String("model", "mlx-community/Qwen3-0.6B-4bit", "base model to LoRA-fine-tune")
-		engine    = fs.String("engine", "", "offline engine: \"pi\" for pi-mlx; empty uses -agent-cmd or a no-op")
+		engine    = fs.String("engine", "", "engine: \"scripted\" for the deterministic spec-tuning ladder, \"pi\" for pi-mlx; empty uses -agent-cmd or a no-op")
 		agentCmd  = fs.String("agent-cmd", "", "external agent CLI for the meta/feedback engine (e.g. claude)")
 		agentArgs = fs.String("agent-args", "", "comma-separated args for -agent-cmd; %MODEL%/%MAXTURNS%/%WORKDIR% substituted")
 		piScript  = fs.String("pi-script", "", "pi-mlx wrapper path for -engine pi (empty auto-detects scripts/pi-mlx, else PATH)")
@@ -166,6 +166,11 @@ func run(argv []string) error {
 // or a no-op so the dry-run self-test produces a real (untrained) gen-0.
 func buildEngine(engine, agentCmd, agentArgs, piScript string) (sia.AgentRunner, string, error) {
 	switch {
+	case engine == "scripted":
+		// Deterministic spec-tuning ladder: writes a revised train.py per
+		// generation (underfit -> diagnose -> push). The labeled-honest fallback
+		// that drives a real multi-gen weight-improvement run without an LLM.
+		return newScriptedSpecLadder(), "scripted", nil
 	case engine == "pi":
 		runner := sia.NewPiRunner("")
 		// The pi-mlx wrapper runs in each generation's WorkingDir, so the script
@@ -178,7 +183,7 @@ func buildEngine(engine, agentCmd, agentArgs, piScript string) (sia.AgentRunner,
 		}
 		return runner, "pi-mlx", nil
 	case engine != "":
-		return nil, "", fmt.Errorf("unknown -engine %q (want \"pi\" or empty)", engine)
+		return nil, "", fmt.Errorf("unknown -engine %q (want \"scripted\", \"pi\", or empty)", engine)
 	case agentCmd != "":
 		return &sia.ExecRunner{ImplName: "claude", Command: agentCmd, Args: splitArgs(agentArgs)}, agentCmd, nil
 	default:

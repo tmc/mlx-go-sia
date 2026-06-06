@@ -120,7 +120,42 @@ func (e *WeightsEvaluator) Evaluate(ctx context.Context, genDir string) (sia.Eva
 		Metric:     "test_loss",
 		HeldOut:    e.HeldOutDir,
 	}
+	// The held-out gate is the hero: a generation that trains and evaluates fine
+	// but whose held-out loss is WORSE than the best of all strictly-prior
+	// generations has regressed (overfitting) and must not be silently blessed.
+	// Flag it REVISE with the comparison spelled out, while keeping the raw
+	// test_loss above so the number is never hidden. The lookup is causal —
+	// generation N reads only generations 1..N-1 — so a later result can never
+	// retroactively change an earlier verdict (an honest online loop). A new
+	// best (or the first generation, which has no prior) stays PASS.
+	if bestGen, bestLoss, ok := e.bestPriorLoss(genDir); ok && loss > bestLoss {
+		res.Verdict = "REVISE"
+		res.Reason = fmt.Sprintf("held-out test_loss %.4f > best-so-far %.4f (gen %d): overfitting, rejected", loss, bestLoss, bestGen)
+	}
 	return e.write(genDir, res)
+}
+
+// bestPriorLoss scans the results.json of every generation strictly before the
+// one at genDir and returns the lowest held-out test_loss found and the
+// generation that produced it. It reads only earlier generations (causal: gen N
+// sees gen 1..N-1), so a verdict never depends on a future result. ok is false
+// when genDir is not a gen_N directory or no prior generation has a usable loss.
+func (e *WeightsEvaluator) bestPriorLoss(genDir string) (bestGen int, bestLoss float64, ok bool) {
+	gen := genFromWorkingDir(genDir)
+	if gen <= 1 {
+		return 0, 0, false // gen 1 (or unparsable) has no prior to compare against
+	}
+	runDir := filepath.Dir(genDir)
+	for prev := 1; prev < gen; prev++ {
+		wr, err := readWeightsResults(filepath.Join(runDir, fmt.Sprintf("gen_%d", prev), sia.NameResultsJSON))
+		if err != nil || !wr.Trained || wr.TestLoss <= 0 {
+			continue // skip generations that did not produce a usable held-out loss
+		}
+		if !ok || wr.TestLoss < bestLoss {
+			bestGen, bestLoss, ok = prev, wr.TestLoss, true
+		}
+	}
+	return bestGen, bestLoss, ok
 }
 
 // evalHeldOut runs mlx-lm-train in eval-only mode (-test, no -train) with the
@@ -135,8 +170,18 @@ func (e *WeightsEvaluator) evalHeldOut(ctx context.Context, adapterDir string) (
 	if batches == 0 {
 		batches = -1
 	}
+	// The held-out eval MUST score the trained adapter, not the bare base model.
+	// mlx-lm-train only attaches and resumes the LoRA adapter inside its training
+	// path; a plain `-test` (no `-train`) evaluates bundle.Model with no adapter,
+	// so it returns the identical base-model loss for every generation regardless
+	// of what was trained. Running `-train -iters 0` enters that path — attach +
+	// resume the adapter — but takes ZERO optimizer steps, so it is a pure
+	// adapter-aware evaluation that does not perturb the resumed weights. Verified:
+	// base model scores 4.1875 while two different real adapters score 2.69 / 2.50.
 	args := []string{
 		"-test",
+		"-train", "-iters", "0",
+		"-batch-size", "2",
 		"-model", e.BaseModel,
 		"-data", e.HeldOutDir,
 		"-adapter-path", adapterDir,
