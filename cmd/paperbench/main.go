@@ -30,6 +30,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	sia "github.com/tmc/mlx-go-sia"
 )
@@ -47,6 +48,7 @@ func run(argv []string) error {
 	var (
 		maxGen   = fs.Int("max-gen", 4, "self-improvement generations per prototype")
 		runsRoot = fs.String("runs-root", "", "directory runs are written under (default: a temp dir)")
+		capture  = fs.String("capture", "", "write a Markdown demo capture to this path (\"-\" for stdout) showing the per-generation evidence_state booleans flipping")
 	)
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(argv); err != nil {
@@ -79,50 +81,69 @@ func run(argv []string) error {
 
 	// Three contrasting prototypes, each with real headroom in its evidence
 	// state. The demo simulates the agent closing the blockers generation over
-	// generation; the evaluator recomputes the truth.
+	// generation; the evaluator recomputes the truth. The fourth prototype is an
+	// adversarial control: it submits the three named fakes (an exit-0 validator
+	// stub, a fabricated manifest hash, a relabeled control row passed off as a
+	// falsifier) every generation, so the captured run shows the real evaluator
+	// holding the high-weight booleans false and the verdict at REVISE even as
+	// the advisory score is gamed upward.
 	prototypes := []prototype{
 		{id: "dflash-ddtree", status: "lightweight"},
 		{id: "eagle3-vocab-translation", status: "lightweight"},
 		{id: "gnosis-trace-compression", status: "covered"},
+		{id: gamedProtoID, status: "covered", gamed: true},
 	}
 
 	ctx := context.Background()
+	var captures []captureProto
 	for i, p := range prototypes {
 		fmt.Printf("\n=== prototype %d/%d: %s (tier %s) ===\n", i+1, len(prototypes), p.id, p.status)
-		if err := runPrototype(ctx, root, i+1, p, rubric, *maxGen); err != nil {
+		cap, err := runPrototype(ctx, root, i+1, p, rubric, *maxGen)
+		if err != nil {
 			return fmt.Errorf("prototype %s: %w", p.id, err)
 		}
+		captures = append(captures, cap)
 	}
 	fmt.Printf("\ndone: scored %d prototype(s) over %d generation(s) each.\n", len(prototypes), *maxGen)
+
+	if *capture != "" {
+		if err := writeCapture(*capture, captures, *maxGen); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-// prototype names one demo target and its coverage-map status tier.
+// prototype names one demo target and its coverage-map status tier. A gamed
+// prototype submits fabricated evidence every generation instead of honestly
+// closing blockers, so the evaluator's rejection of the fakes is captured.
 type prototype struct {
 	id     string
 	status string
+	gamed  bool
 }
 
 // runPrototype runs the SIA loop for one prototype: the simulated target writes
 // progressively more complete artifacts each generation, and the real
 // PaperEvaluator scores them. It prints the per-generation verdict + score.
-func runPrototype(ctx context.Context, runsRoot string, runID int, p prototype, rubric sia.Rubric, maxGen int) error {
+func runPrototype(ctx context.Context, runsRoot string, runID int, p prototype, rubric sia.Rubric, maxGen int) (captureProto, error) {
+	cap := captureProto{id: p.id, status: p.status}
 	taskRoot := filepath.Join(runsRoot, "tasks", p.id)
 	task, err := scaffoldTask(taskRoot, p.id)
 	if err != nil {
-		return err
+		return cap, err
 	}
 	resolved, err := sia.DefaultAgentReference.Resolve(task)
 	if err != nil {
-		return err
+		return cap, err
 	}
 	taskFiles, err := sia.LoadTaskFiles(task, resolved)
 	if err != nil {
-		return err
+		return cap, err
 	}
 	layout, err := sia.SetupRunDirectory(filepath.Join(runsRoot, "runs", p.id), runID)
 	if err != nil {
-		return err
+		return cap, err
 	}
 
 	// The meta/feedback engine is a no-op: the orchestrator only needs it to
@@ -132,10 +153,15 @@ func runPrototype(ctx context.Context, runsRoot string, runID int, p prototype, 
 	// The simulated agent improves across generations: gen 1 ships an empty
 	// fixture (REVISE), and each later gen adds the artifacts that flip another
 	// blocker, until it reaches a PASS. WorkingDir is the gen dir the evaluator
-	// scores, so writing here is exactly what an honest agent would do.
+	// scores, so writing here is exactly what an honest agent would do. A gamed
+	// prototype instead submits fabricated evidence every generation.
 	target := sia.FuncTargetExecutor(func(_ context.Context, req sia.TargetRequest) (sia.TargetResult, error) {
 		gen := genOf(layout, req.WorkingDir, maxGen)
-		writeGenArtifacts(req.WorkingDir, gen)
+		if p.gamed {
+			writeGamedArtifacts(req.WorkingDir)
+		} else {
+			writeGenArtifacts(req.WorkingDir, gen)
+		}
 		return sia.TargetResult{Success: true, Stdout: fmt.Sprintf("generation %d artifacts written", gen)}, nil
 	})
 
@@ -167,15 +193,16 @@ func runPrototype(ctx context.Context, runsRoot string, runID int, p prototype, 
 		MaxGen:      maxGen,
 		Focus:       sia.FocusHarness,
 	}); err != nil {
-		return err
+		return cap, err
 	}
 
-	// Print the climbing curve from each generation's results.json.
+	// Collect each generation's honestly-recomputed results.json and print the
+	// climbing curve with the evidence keys newly cleared each generation.
 	for gen := 1; gen <= maxGen; gen++ {
-		v, score, blockers := readVerdict(layout.ResultsJSON(gen))
-		fmt.Printf("  gen %d: %-6s advisory=%.2f blockers=%v\n", gen, v, score, blockers)
+		cap.gens = append(cap.gens, readGenCapture(layout.ResultsJSON(gen)))
 	}
-	return nil
+	reportCapture(layout, cap, maxGen)
+	return cap, nil
 }
 
 // genOf infers the 1-based generation number from the working dir path.
@@ -225,6 +252,50 @@ func writeGenArtifacts(dir string, gen int) {
 	}
 }
 
+// writeGamedArtifacts simulates an agent gaming the rubric: it submits the
+// three fabrications the spec's threat model names, all at once, every
+// generation. None of them survives the evaluator's honest recompute:
+//
+//   - an exit-0 validator stub: ignored — the evaluator runs the FROZEN,
+//     checksummed rubric validator, never a script from the gen dir, so
+//     validator_command is decided by the real validator regardless.
+//   - a fabricated manifest hash pointing at no real artifact: re-hashing finds
+//     no match, so artifact_manifest_hash stays false.
+//   - a validator-accepted row relabeled as a "falsifier": the frozen validator
+//     accepts it, so it is not a claim near-miss and falsifier_rows stays false.
+//
+// The agent does ship a real, validator-accepted control row, so fixture_row
+// and control_rows do go true and the advisory score is gamed upward — but the
+// covered-tier verdict stays REVISE because the high-weight booleans the fakes
+// targeted are held false by recompute. Score up, verdict not: the cleanest
+// proof that the advisory number is not the pass criterion.
+func writeGamedArtifacts(dir string) {
+	id := protoIDFromGenDir(dir)
+	fixtures := filepath.Join(dir, "fixtures")
+	_ = os.MkdirAll(fixtures, 0o755)
+
+	// A genuine, validator-accepted control row (earns fixture_row + control_rows)
+	// plus a SECOND row that is also validator-accepted but relabeled as a
+	// falsifier — there is no real validator-rejected near-miss, so falsifier_rows
+	// will not flip.
+	writeLines(filepath.Join(fixtures, id+".jsonl"), []string{
+		demoRow("control-1", "gpu", true),
+		demoRow("control-2", "gpu", true), // relabeled "falsifier" — validator still accepts it
+	})
+
+	// An exit-0 validator stub the agent hopes the evaluator will run. It will
+	// not: validator_command uses the frozen rubric validator.
+	writeFile(filepath.Join(dir, "validator.sh"), "#!/bin/sh\nexit 0\n")
+
+	// A manifest claiming a fabricated sha256 for an artifact that does not exist
+	// in the gen dir; re-hashing finds no match.
+	fakeHash := "sha256:" + strings.Repeat("ab", 32)
+	writeFile(filepath.Join(dir, "evidence-manifest.json"), fmt.Sprintf(
+		`{"schema_version":"mlx_go_evidence_manifest.v0","manifest_id":"gamed","run_id":"gamed",`+
+			`"artifacts":[{"artifact_id":"ghost","artifact_kind":"fixture","path":"ghost.jsonl",`+
+			`"sha256":%q,"byte_size":123,"source_gaps":[]}],"source_gaps":[]}`, fakeHash))
+}
+
 // protoIDFromGenDir extracts the prototype id from a .../runs/<id>/run_N/gen_M path.
 func protoIDFromGenDir(genDir string) string {
 	// genDir = <runsRoot>/runs/<id>/run_N/gen_M
@@ -271,24 +342,6 @@ func writeManifest(genDir, rel string) {
 	}
 	b, _ := json.MarshalIndent(m, "", "  ")
 	writeFileBytes(filepath.Join(genDir, "evidence-manifest.json"), b)
-}
-
-// readVerdict reads a generation's results.json verdict, advisory score, and
-// blockers; it returns sensible defaults if the file is absent.
-func readVerdict(path string) (verdict string, score float64, blockers []string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "MISSING", 0, nil
-	}
-	var r struct {
-		Verdict       string   `json:"verdict"`
-		AdvisoryScore float64  `json:"advisory_score"`
-		Blockers      []string `json:"blockers"`
-	}
-	if err := json.Unmarshal(data, &r); err != nil {
-		return "INVALID", 0, nil
-	}
-	return r.Verdict, r.AdvisoryScore, r.Blockers
 }
 
 // --- demo scaffolding (offline, no network) ---
