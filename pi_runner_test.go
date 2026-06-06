@@ -156,6 +156,41 @@ func TestPiRunnerMissingScript(t *testing.T) {
 	}
 }
 
+// TestPiRunnerScriptPathResolution documents the integration rule consumers in
+// cmd/ rely on: because the wrapper runs in the request's working directory (a
+// run/generation dir), a relative Script resolves against that dir — not the
+// repository — and is not found, while an absolute Script works from any
+// working directory.
+func TestPiRunnerScriptPathResolution(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh")
+	}
+	// A real wrapper living in scriptDir, addressed two ways.
+	scriptDir := t.TempDir()
+	abs := filepath.Join(scriptDir, "pi-mlx")
+	writeTestFile(t, abs, "#!/bin/sh\ncat >/dev/null\n")
+	if err := os.Chmod(abs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// WorkingDir is a *different* directory, standing in for runs/run_1/gen_1.
+	workDir := t.TempDir()
+
+	t.Run("relative path is not found from a foreign working dir", func(t *testing.T) {
+		r := NewPiRunner("")
+		r.Script = "pi-mlx" // bare/relative: resolved against workDir, where it does not exist
+		if err := r.Run(context.Background(), AgentRequest{WorkingDir: workDir}); err == nil {
+			t.Fatal("expected error for relative script not in working dir, got nil")
+		}
+	})
+	t.Run("absolute path runs from any working dir", func(t *testing.T) {
+		r := NewPiRunner("")
+		r.Script = abs
+		if err := r.Run(context.Background(), AgentRequest{WorkingDir: workDir}); err != nil {
+			t.Fatalf("absolute script should run: %v", err)
+		}
+	})
+}
+
 func readTestFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)

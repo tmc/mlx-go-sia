@@ -14,8 +14,10 @@ import (
 const DefaultPiModel = "mlx-community/Llama-3.2-1B-Instruct-4bit"
 
 // DefaultPiScript is the wrapper command [PiRunner] invokes. The bare name is
-// resolved on PATH; point [PiRunner.Script] at the repository's scripts/pi-mlx
-// to run it in place without installing.
+// resolved on PATH; to run the repository's scripts/pi-mlx without installing
+// it, set [PiRunner.Script] to its ABSOLUTE path. A relative path would be
+// resolved against the request's working directory (the run/generation dir),
+// not the repository, and so would not be found.
 const DefaultPiScript = "pi-mlx"
 
 // PiRunner is the offline SIA meta/feedback engine: an [AgentRunner] that drives
@@ -36,7 +38,9 @@ type PiRunner struct {
 	// not name one. Empty means [DefaultPiModel].
 	Model string
 	// Script is the wrapper command (default [DefaultPiScript], resolved on
-	// PATH). Set it to a path such as "scripts/pi-mlx" to run in place.
+	// PATH). To run the repository copy without installing it, set this to the
+	// ABSOLUTE path of scripts/pi-mlx: the command runs in the request's working
+	// directory, so a relative path resolves against that dir, not the repo.
 	Script string
 	// Stdout receives the generated text; nil means os.Stdout. The orchestrator
 	// captures the working directory afterward, so a run typically lets the
@@ -54,7 +58,8 @@ var _ AgentRunner = (*PiRunner)(nil)
 //
 // The wrapper command defaults to [DefaultPiScript] resolved on PATH; to run the
 // repository's copy without installing it, set the returned runner's Script field
-// to a path such as "scripts/pi-mlx".
+// to the ABSOLUTE path of scripts/pi-mlx (a relative path resolves against the
+// request's working directory, not the repository).
 func NewPiRunner(model string) *PiRunner {
 	return &PiRunner{Model: model}
 }

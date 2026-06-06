@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# pi-mlx-offline-proof — the ~2-second "this runs fully on-device" demo segment.
+#
+# Hard-disables network (HF_HUB_OFFLINE + bogus proxies so any outbound call
+# fails), then drives the local model through scripts/pi-mlx. If it still
+# generates, the offline claim is proven: the model came from the local cache,
+# not the network. The stderr line `path=.../models--.../snapshots/...` shows
+# exactly which on-disk model answered.
+#
+# Usage:  scripts/pi-mlx-offline-proof  ["your prompt"]
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+prompt="${1:-Write a Python one-liner that prints the first 5 squares.}"
+
+echo "== pi-mlx offline proof: network disabled, generating from on-device model ==" >&2
+printf '%s\n' "$prompt" |
+	HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+		HTTP_PROXY=http://127.0.0.1:1 HTTPS_PROXY=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1 \
+		"$here/pi-mlx"
