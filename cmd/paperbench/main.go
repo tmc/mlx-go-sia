@@ -82,11 +82,12 @@ func run(argv []string) error {
 	// Three contrasting prototypes, each with real headroom in its evidence
 	// state. The demo simulates the agent closing the blockers generation over
 	// generation; the evaluator recomputes the truth. The fourth prototype is an
-	// adversarial control: it submits the three named fakes (an exit-0 validator
+	// adversarial control: it submits the four named fakes (an exit-0 validator
 	// stub, a fabricated manifest hash, a relabeled control row passed off as a
-	// falsifier) every generation, so the captured run shows the real evaluator
-	// holding the high-weight booleans false and the verdict at REVISE even as
-	// the advisory score is gamed upward.
+	// falsifier, and a self-reported evidence_state claiming all seven keys true)
+	// every generation, so the captured run shows the real evaluator holding the
+	// targeted booleans false and the verdict at REVISE even as the advisory
+	// score is gamed upward.
 	prototypes := []prototype{
 		{id: "dflash-ddtree", status: "lightweight"},
 		{id: "eagle3-vocab-translation", status: "lightweight"},
@@ -196,10 +197,13 @@ func runPrototype(ctx context.Context, runsRoot string, runID int, p prototype, 
 		return cap, err
 	}
 
-	// Collect each generation's honestly-recomputed results.json and print the
-	// climbing curve with the evidence keys newly cleared each generation.
+	// Collect each generation's honestly-recomputed results.json and, for a gamed
+	// prototype, the agent's planted self-report from the SAME gen dir, so the
+	// capture's claimed-vs-recomputed diff is two reads from one directory.
 	for gen := 1; gen <= maxGen; gen++ {
-		cap.gens = append(cap.gens, readGenCapture(layout.ResultsJSON(gen)))
+		gc := readGenCapture(layout.ResultsJSON(gen))
+		gc.claimed = readSelfReport(filepath.Join(layout.GenDir(gen), agentSelfReportName))
+		cap.gens = append(cap.gens, gc)
 	}
 	reportCapture(layout, cap, maxGen)
 	return cap, nil
@@ -253,7 +257,7 @@ func writeGenArtifacts(dir string, gen int) {
 }
 
 // writeGamedArtifacts simulates an agent gaming the rubric: it submits the
-// three fabrications the spec's threat model names, all at once, every
+// four fabrications the spec's threat model names, all at once, every
 // generation. None of them survives the evaluator's honest recompute:
 //
 //   - an exit-0 validator stub: ignored — the evaluator runs the FROZEN,
@@ -263,6 +267,9 @@ func writeGenArtifacts(dir string, gen int) {
 //     no match, so artifact_manifest_hash stays false.
 //   - a validator-accepted row relabeled as a "falsifier": the frozen validator
 //     accepts it, so it is not a claim near-miss and falsifier_rows stays false.
+//   - a self-reported evidence_state claiming all seven keys true: the evaluator
+//     never reads an agent-authored evidence_state, so the claim is overruled
+//     key by key by recompute.
 //
 // The agent does ship a real, validator-accepted control row, so fixture_row
 // and control_rows do go true and the advisory score is gamed upward — but the
@@ -294,6 +301,30 @@ func writeGamedArtifacts(dir string) {
 		`{"schema_version":"mlx_go_evidence_manifest.v0","manifest_id":"gamed","run_id":"gamed",`+
 			`"artifacts":[{"artifact_id":"ghost","artifact_kind":"fixture","path":"ghost.jsonl",`+
 			`"sha256":%q,"byte_size":123,"source_gaps":[]}],"source_gaps":[]}`, fakeHash))
+
+	// The fourth named trick: a self-reported evidence_state claiming every key
+	// true, with a fabricated PASS/1.00. The evaluator never reads it
+	// (paper_eval.go: "A self-reported evidence_state in the gen dir is never
+	// read"); we plant it under an agent-owned name — never results.json, which
+	// the evaluator writes itself — so the capture can show the claim beside the
+	// honest recompute that overrules it.
+	selfReport := map[string]any{
+		"_comment":       "AGENT-AUTHORED CLAIM — not read by the evaluator; planted to prove the recompute ignores it.",
+		"verdict":        "PASS",
+		"advisory_score": 1.0,
+		"evidence_state": map[string]bool{
+			"validator_command":              true,
+			"artifact_manifest_hash":         true,
+			"model_backed_or_opt_in_command": true,
+			"falsifier_rows":                 true,
+			"control_rows":                   true,
+			"fixture_row":                    true,
+			"heavy_skip_narrowed_or_cleared": true,
+		},
+	}
+	if data, err := json.MarshalIndent(selfReport, "", "  "); err == nil {
+		writeFileBytes(filepath.Join(dir, agentSelfReportName), append(data, '\n'))
+	}
 }
 
 // protoIDFromGenDir extracts the prototype id from a .../runs/<id>/run_N/gen_M path.

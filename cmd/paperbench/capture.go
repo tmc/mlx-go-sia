@@ -37,6 +37,11 @@ type genCapture struct {
 	Detail        map[string]string `json:"evidence_detail"`
 	RowID         string            `json:"row_id"`
 	Status        string            `json:"status"`
+
+	// claimed is the agent's planted self-report, read from agentSelfReportName
+	// beside results.json in the SAME gen dir. nil for honest prototypes (none
+	// planted). It is shown only to contrast with EvidenceState; never trusted.
+	claimed *selfReport
 }
 
 // captureProto holds one prototype's per-generation captures for rendering.
@@ -58,6 +63,30 @@ func readGenCapture(path string) genCapture {
 		return genCapture{Verdict: "INVALID"}
 	}
 	return g
+}
+
+// selfReport is the agent-authored claim planted in a gamed gen dir. Only these
+// fields are read back for the captured claimed-vs-recomputed diff; the rest of
+// the planted JSON is the agent's noise.
+type selfReport struct {
+	Verdict       string          `json:"verdict"`
+	AdvisoryScore float64         `json:"advisory_score"`
+	EvidenceState map[string]bool `json:"evidence_state"`
+}
+
+// readSelfReport loads an agent-authored self-report from path, or nil if absent
+// or malformed — an honest prototype plants none. This is the only place the
+// agent's claim enters the capture; it is shown, never trusted.
+func readSelfReport(path string) *selfReport {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var sr selfReport
+	if err := json.Unmarshal(data, &sr); err != nil {
+		return nil
+	}
+	return &sr
 }
 
 // writeCapture renders the captured run as a self-contained demo artifact: the
@@ -96,6 +125,16 @@ func writeCapture(path string, protos []captureProto, maxGen int) error {
 		return fmt.Errorf("write capture %s: %w", jsonPath, err)
 	}
 
+	if anyGamed(protos) {
+		var gb strings.Builder
+		writeGamedCallout(&gb, protos)
+		gamedPath := strings.TrimSuffix(mdPath, filepath.Ext(mdPath)) + ".gamed.md"
+		if err := os.WriteFile(gamedPath, []byte(gb.String()), 0o644); err != nil {
+			return fmt.Errorf("write capture %s: %w", gamedPath, err)
+		}
+		fmt.Printf("gamed-attempt capture written to %s\n", gamedPath)
+	}
+
 	fmt.Printf("\ncapture written to %s and %s\n", mdPath, jsonPath)
 	return nil
 }
@@ -127,6 +166,10 @@ func writeCaptureMarkdown(b *strings.Builder, protos []captureProto, maxGen int)
 	fmt.Fprintf(b, "pressure. The agent writes a progressively more complete artifact ladder (scripted, one new artifact per gen) ")
 	fmt.Fprintf(b, "and the evaluator independently verifies each addition actually satisfies the check, holding the boolean false ")
 	fmt.Fprintf(b, "if it does not. What is demonstrated is the evaluator's honest recompute, not an agent learning to fix blockers.\n\n")
+	fmt.Fprintf(b, "The gamed prototype's `%s` is agent-authored fixture data the demo plants on purpose — ", agentSelfReportName)
+	fmt.Fprintf(b, "not the output of a real optimization loop — read back only to contrast with the evaluator's recompute.\n\n")
+	fmt.Fprintf(b, "**Adversarial control:** one prototype (`%s`) tries to cheat the gate four ways every generation — ", gamedProtoID)
+	fmt.Fprintf(b, "including a self-report claiming all seven keys true; the evaluator caught every one (section below).\n\n")
 
 	// Headline climbing-score series across all prototypes.
 	fmt.Fprintf(b, "## Climbing series — verdict is categorical and tier-gated; advisory score is a proxy\n\n")
@@ -166,41 +209,174 @@ func writeCaptureMarkdown(b *strings.Builder, protos []captureProto, maxGen int)
 	fmt.Fprintf(b, "`TestManifestHash_GamingVectors` in `paper_eval_test.go`.\n")
 }
 
-// writeGamedCallout renders the adversarial-control section: a captured run of
-// the real evaluator on a gamed gen dir, proving fakes are caught and that the
-// advisory score can be gamed upward while the verdict stays REVISE. It is a
-// no-op if the run contained no gamed prototype.
+// writeGamedCallout renders the adversarial-control exhibit: the gamed
+// prototype's planted all-true self-report next to the evaluator's honest
+// recompute of the SAME gen dir, a per-trick "fake -> why it failed" list, and a
+// one-line stage frame. Every mark, count, verdict, and reason is read from a
+// real run (the planted self-report and results.json), never asserted. It is a
+// no-op when the run contained no gamed prototype.
 func writeGamedCallout(b *strings.Builder, protos []captureProto) {
 	for _, p := range protos {
-		if !isGamedProto(p) {
+		if !isGamedProto(p) || len(p.gens) == 0 {
 			continue
 		}
-		g := p.gens[0] // gamed prototype submits the same fabrications every gen
-		fmt.Fprintf(b, "## Adversarial control — a gamed attempt, scored by the same evaluator\n\n")
-		fmt.Fprintf(b, "`%s` submits the three named fabrications every generation: an `exit 0` validator stub, a manifest with a ", p.id)
-		fmt.Fprintf(b, "fabricated sha256 pointing at no real artifact, and a validator-accepted row relabeled as a \"falsifier\". ")
-		fmt.Fprintf(b, "It ships one genuine control row too, so the advisory score is gamed up to **%.2f** — but the verdict is ", g.AdvisoryScore)
-		fmt.Fprintf(b, "**%s** (tier `%s`), because the high-weight booleans the fakes targeted are held false by recompute:\n\n", g.Verdict, p.status)
-		for _, key := range []string{"artifact_manifest_hash", "falsifier_rows", "validator_command"} {
-			state := "false"
-			if g.EvidenceState[key] {
-				state = "true"
-			}
-			fmt.Fprintf(b, "- `%s` = **%s** — %s\n", key, state, g.Detail[key])
+		g := p.gens[0] // gamed prototype plants the same fakes every gen
+		fmt.Fprintf(b, "## We tried to cheat our own gate — no trick survived the recompute\n\n")
+		fmt.Fprintf(b, "*We tried to cheat our own gate four ways — including a self-report claiming all seven keys PASS; ")
+		fmt.Fprintf(b, "the evaluator recomputed from ground truth and not one trick survived.*\n\n")
+		fmt.Fprintf(b, "`%s` ships four named fabrications every generation. The evaluator reads none of them; ", p.id)
+		fmt.Fprintf(b, "it recomputes each boolean from ground truth in the gen dir. The agent even planted ")
+		fmt.Fprintf(b, "`%s` claiming **all seven keys true** with a fabricated `verdict: PASS`. ", agentSelfReportName)
+		fmt.Fprintf(b, "Below, the claim sits beside the honest recompute, both read from the same gen dir:\n\n")
+
+		fmt.Fprintf(b, "| evidence key | agent claimed | evaluator recomputed | recompute reason |\n")
+		fmt.Fprintf(b, "|---|:--:|:--:|---|\n")
+		for _, key := range evidenceKeys {
+			fmt.Fprintf(b, "| `%s` | %s | %s | %s |\n",
+				key, tick(claimedKey(g.claimed, key)), tick(g.EvidenceState[key]), g.Detail[key])
 		}
-		fmt.Fprintf(b, "\nScore gamed up, verdict held at REVISE: the cleanest proof that the advisory number is **not** the pass criterion. ")
-		fmt.Fprintf(b, "A self-report-only agent would have scored this PASS.\n\n")
+		fmt.Fprintf(b, "| **verdict** | **%s** (claimed) | **%s** (recomputed) | %s; held by open blockers %s |\n",
+			claimedVerdict(g.claimed), g.Verdict, g.Detail["fast_check"], blockerList(g.Blockers))
+		fmt.Fprintf(b, "| **advisory_score** | **%.2f** (claimed) | **%.2f** (recomputed) | weighted proxy, not the gate |\n\n",
+			claimedScore(g.claimed), g.AdvisoryScore)
+
+		claimed := countTrue(claimedState(g.claimed))
+		recomp := countTrue(g.EvidenceState)
+		fmt.Fprintf(b, "Agent claimed **%d/%d** keys true; the evaluator recomputed **%d/%d**. ",
+			claimed, len(evidenceKeys), recomp, len(evidenceKeys))
+		fmt.Fprintf(b, "The self-report changed nothing: verdict **%s**, with open blockers %s. ",
+			g.Verdict, blockerList(g.Blockers))
+		fmt.Fprintf(b, "`paper_eval.go`: *\"A self-reported evidence_state in the gen dir is never read.\"*\n\n")
+		fmt.Fprintf(b, "The four recomputed-true keys are not leaked fakes: the agent shipped one genuine control row ")
+		fmt.Fprintf(b, "(earning `fixture_row` + `control_rows`), and `validator_command` + `model_backed_or_opt_in_command` ")
+		fmt.Fprintf(b, "pass their own frozen checks regardless of the agent. That real credit is exactly why the gamed score ")
+		fmt.Fprintf(b, "reaches %.2f — and exactly why the score is a proxy, not the gate.\n\n", g.AdvisoryScore)
+
+		fmt.Fprintf(b, "Four named tricks, each defeated by an evaluator-owned recompute:\n\n")
+		for _, t := range gamedTricks { // mapping mirrors writeGamedArtifacts in main.go
+			reason := g.Detail[t.key]
+			switch t.key {
+			case "validator_command":
+				// The stub is never run; the recompute is the frozen validator's.
+				reason = "stub never run — the evaluator runs the frozen validator instead (" + reason + ")"
+			case "":
+				// The self-report trick targets no single key — the verdict itself.
+				reason = fmt.Sprintf("never read; recomputed %d/%d true, so the verdict stays %s", recomp, len(evidenceKeys), g.Verdict)
+			}
+			fmt.Fprintf(b, "%d. **%s** — %s — %s\n", t.n, t.fake, displayKey(t.key), reason)
+		}
+		fmt.Fprintf(b, "\nScore gamed up to %.2f, verdict held at %s: the cleanest proof the advisory number is **not** the pass criterion.\n\n",
+			g.AdvisoryScore, g.Verdict)
 		return
 	}
+}
+
+// gamedTricks maps each fabrication writeGamedArtifacts plants to the evidence
+// key it targets, so the capture can pair each fake with the recompute reason
+// (read from results.json) that defeated it. Only the trick->key mapping and the
+// human-readable fake descriptions are static; the reason text is always read
+// from g.Detail. This list MUST mirror writeGamedArtifacts in main.go.
+var gamedTricks = []struct {
+	n    int
+	fake string
+	key  string
+}{
+	{1, "exit-0 validator stub (`validator.sh`)", "validator_command"},
+	{2, "fabricated sha256 manifest over a non-existent `ghost.jsonl`", "artifact_manifest_hash"},
+	{3, "a second validator-accepted row offered as a falsifier", "falsifier_rows"},
+	{4, "self-reported `evidence_state` claiming all seven keys true", ""},
+}
+
+// tick renders a captured boolean as the capture's ✓ / · glyphs.
+func tick(v bool) string {
+	if v {
+		return "✓"
+	}
+	return "·"
+}
+
+// countTrue counts true values in an evidence map (claimed or recomputed).
+func countTrue(m map[string]bool) int {
+	n := 0
+	for _, v := range m {
+		if v {
+			n++
+		}
+	}
+	return n
+}
+
+// displayKey labels the evidence key a trick targets; the self-report trick
+// targets no single key but the verdict itself.
+func displayKey(key string) string {
+	if key == "" {
+		return "targets the verdict, not one key"
+	}
+	return "targets `" + key + "`"
+}
+
+// blockerList renders the captured open-blocker keys, or "none" if empty.
+func blockerList(blockers []string) string {
+	if len(blockers) == 0 {
+		return "none"
+	}
+	var qs []string
+	for _, b := range blockers {
+		qs = append(qs, "`"+b+"`")
+	}
+	return strings.Join(qs, ", ")
+}
+
+// claimedState returns the agent's claimed evidence map, or nil for an honest
+// prototype (which plants no self-report). Indexing a nil map is false, so
+// callers need no extra guard.
+func claimedState(c *selfReport) map[string]bool {
+	if c == nil {
+		return nil
+	}
+	return c.EvidenceState
+}
+
+func claimedKey(c *selfReport, key string) bool { return claimedState(c)[key] }
+
+func claimedVerdict(c *selfReport) string {
+	if c == nil {
+		return "—"
+	}
+	return c.Verdict
+}
+
+func claimedScore(c *selfReport) float64 {
+	if c == nil {
+		return 0
+	}
+	return c.AdvisoryScore
 }
 
 // gamedProtoID is the id of the adversarial-control prototype the gamed-attempt
 // callout describes.
 const gamedProtoID = "gamed-attempt"
 
+// agentSelfReportName is the agent-authored, deliberately-untrusted self-report
+// the gamed prototype plants in its gen dir. It is NOT NameResultsJSON
+// ("results.json"): the evaluator writes results.json itself and would clobber a
+// plant by that name. The evaluator never reads this file; the capture reads it
+// only to show the claim the honest recompute overrules.
+const agentSelfReportName = "agent-self-report.json"
+
 // isGamedProto reports whether p is the adversarial-control prototype.
 func isGamedProto(p captureProto) bool {
 	return p.id == gamedProtoID
+}
+
+// anyGamed reports whether protos contains the adversarial-control prototype.
+func anyGamed(protos []captureProto) bool {
+	for _, p := range protos {
+		if isGamedProto(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeProtoSection renders one prototype's per-generation evidence table.
@@ -321,6 +497,12 @@ type captureGenJSON struct {
 	NewlyCleared  []string          `json:"newly_cleared"`
 	OpenBlockers  []string          `json:"open_blockers"`
 	Detail        map[string]string `json:"evidence_detail"`
+
+	// Agent self-report, shown for contrast and never trusted. Present only for
+	// the gamed prototype; omitted for honest prototypes (which plant none).
+	ClaimedState   map[string]bool `json:"claimed_state,omitempty"`
+	ClaimedVerdict string          `json:"claimed_verdict,omitempty"`
+	ClaimedScore   float64         `json:"claimed_score,omitempty"`
 }
 
 // captureJSON builds the machine-readable capture from the per-prototype runs.
@@ -339,7 +521,7 @@ func captureJSON(protos []captureProto, maxGen int) captureReport {
 			if blockers == nil {
 				blockers = []string{}
 			}
-			cp.Gens = append(cp.Gens, captureGenJSON{
+			gj := captureGenJSON{
 				Gen:           i + 1,
 				Verdict:       g.Verdict,
 				AdvisoryScore: g.AdvisoryScore,
@@ -348,7 +530,14 @@ func captureJSON(protos []captureProto, maxGen int) captureReport {
 				NewlyCleared:  newlyCleared(prev, g.EvidenceState),
 				OpenBlockers:  blockers,
 				Detail:        g.Detail,
-			})
+			}
+			// Only the gamed prototype plants a self-report; honest gens stay clean.
+			if g.claimed != nil {
+				gj.ClaimedState = g.claimed.EvidenceState
+				gj.ClaimedVerdict = g.claimed.Verdict
+				gj.ClaimedScore = g.claimed.AdvisoryScore
+			}
+			cp.Gens = append(cp.Gens, gj)
 			prev = g.EvidenceState
 		}
 		rep.Prototypes = append(rep.Prototypes, cp)
