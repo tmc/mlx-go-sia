@@ -43,14 +43,12 @@ operator's responsibility.
 ## Run
 
 ```bash
-cd examples/mlx-go-sia
-
 # Dry run: set up the run + write the meta prompt, with a no-op engine/target.
-go run ./cmd/sia -task-dir ./tasks/mytask -max-gen 3 -run-id 1 -dry-run
+go run ./examples/core/sia -task-dir ./tasks/mytask -max-gen 3 -run-id 1 -dry-run
 
 # Live run: drive an external agent CLI as the meta/feedback engine, and run the
 # target agent under python3 with the fixed CLI contract.
-go run ./cmd/sia -task-dir ./tasks/mytask -max-gen 5 -run-id 1 \
+go run ./examples/core/sia -task-dir ./tasks/mytask -max-gen 5 -run-id 1 \
     -agent-cmd claude -agent-args '-p,--model,%MODEL%' \
     -interpreter python3
 ```
@@ -63,7 +61,7 @@ provider without hardcoding the endpoint:
 ```bash
 # Drive the meta/feedback engine against Nebius Token Factory (OpenAI-compatible).
 export NEBIUS_API_KEY=...
-go run ./cmd/sia -task-dir ./tasks/mytask -max-gen 1 -run-id 1 \
+go run ./examples/core/sia -task-dir ./tasks/mytask -max-gen 1 -run-id 1 \
     -meta-agent-profile kimi-nebius-meta \
     -target-agent-profile qwen-nebius-target \
     -agent-cmd oai-agent \
@@ -121,6 +119,33 @@ res, err := orch.Run(ctx, sia.RunOptions{
 ```
 
 See the runnable package `Example` in `example_test.go`.
+
+## Examples
+
+The commands live under themed `examples/` directories. Each is a self-contained
+`package main` runnable from the repo root with `go run ./examples/<group>/<name>`;
+each has a `Command` doc comment with full usage.
+
+| Command | Run | What it does |
+|---|---|---|
+| sia | `go run ./examples/core/sia` | The SIA loop CLI: meta-seed, run, evaluate, feedback-rewrite per generation. |
+| metalopt | `go run ./examples/metal/metalopt` | SIA loop that rewrites an MLX Metal kernel; correctness-gated GPU throughput. |
+| localtrain | `go run ./examples/weights/localtrain` | P6 totally-local weight-training demo; held-out gate REVISEs overfit. |
+| sia-train | `go run ./examples/weights/sia-train` | Weights mode via a declarative `train.py` spec → `mlx-lm-train`. |
+| leakguard-demo | `go run ./examples/weights/leakguard-demo` | Proves the held-out set is structurally unreachable by the training agent. |
+| paperbench | `go run ./examples/paper/paperbench` | SIA loop with a `PaperEvaluator` that honest-recomputes a paper-roadmap rubric. |
+| inferopt | `go run ./examples/inference/inferopt` | P3 sampler-optimization loop; tokens/sec gated on exact-token correctness. |
+| siachart | `go run ./examples/inference/siachart` | Renders a run's throughput series (terminal sparkline+table or CSV). |
+| sia-traindata | `go run ./examples/cloud/sia-traindata` | Renders recorded trajectories into token-level `train_data.jsonl`. |
+| sia-tinker-train | `go run ./examples/cloud/sia-tinker-train` | Trains a LoRA on that data via a local localtinker coordinator. |
+| siadash | `go run ./examples/dashboard/siadash` | Native macOS SwiftUI dashboard (`//go:build darwin`) for the weights loop. |
+
+`examples/selfport/` is a script-driven self-port task (an agent ports a Python
+reference to Go, graded by `go test`), not a Go command.
+
+Design material lives under `docs/`: `docs/sia-rlsd-seam.go` is a `//go:build
+ignore` design sketch of an RLSD training seam, and `docs/specs/` holds the
+SIA design specification suite (`00-master.md` plus per-track specs).
 
 ## Fidelity
 
