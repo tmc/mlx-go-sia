@@ -16,25 +16,53 @@ import (
 // results.json under runs-localtrain/run_N/gen_M. The fields mirror the
 // WeightsResult written by mlx-go-sia's localtrain WeightsEvaluator.
 //
-// HasLoss is false when results.json omits test_loss (omitempty): the dashboard
-// renders a gap rather than a zero so a missing value never reads as 0.0.
+// The loop runs in one of two metric modes and the dashboard renders whichever
+// the run emitted: held-out test_loss (lower is better) or held-out accuracy
+// (higher is better). HasLoss / HasAccuracy is false when the corresponding
+// field is omitted (omitempty), so a missing value renders as a gap, never 0.0.
 type Gen struct {
-	Run        int
-	Gen        int
-	Verdict    string  // PASS, REVISE, SKIPPED, ...
-	Trained    bool    // adapter was trained and present
-	TestLoss   float64 // held-out cross-entropy; lower is better
-	HasLoss    bool    // false => test_loss absent, render a gap
-	Perplexity float64
-	Metric     string
-	Reason     string
+	Run         int
+	Gen         int
+	Verdict     string  // PASS, REVISE, SKIPPED, ...
+	Trained     bool    // adapter was trained and present
+	TestLoss    float64 // held-out cross-entropy; lower is better
+	HasLoss     bool    // false => test_loss absent, render a gap
+	Accuracy    float64 // held-out accuracy in [0,1]; higher is better
+	HasAccuracy bool    // false => accuracy absent, render a gap
+	Correct     int     // held-out items scored correct (accuracy mode)
+	Total       int     // held-out items scored (accuracy mode)
+	Perplexity  float64
+	Metric      string
+	Reason      string
 }
 
-// weightsResult matches the JSON schema written by the weight loop.
+// HigherBetter reports whether this generation's plotted metric improves upward.
+// Accuracy climbs; test_loss descends. A gen with accuracy present is an
+// accuracy gen even if a (legacy) loss field is also set.
+func (g Gen) HigherBetter() bool { return g.HasAccuracy }
+
+// Value returns the plotted metric value and whether it is present. Accuracy
+// takes precedence over loss when both happen to be set.
+func (g Gen) Value() (float64, bool) {
+	if g.HasAccuracy {
+		return g.Accuracy, true
+	}
+	if g.HasLoss {
+		return g.TestLoss, true
+	}
+	return 0, false
+}
+
+// weightsResult matches the JSON schema written by the weight loop. Both
+// test_loss and accuracy are optional (omitempty): a run emits one or the other
+// depending on its metric mode.
 type weightsResult struct {
 	Verdict    string  `json:"verdict"`
 	Trained    bool    `json:"trained"`
 	TestLoss   float64 `json:"test_loss"`
+	Accuracy   float64 `json:"accuracy"`
+	Correct    int     `json:"correct"`
+	Total      int     `json:"total"`
 	Perplexity float64 `json:"perplexity"`
 	Metric     string  `json:"metric"`
 	Reason     string  `json:"reason"`
@@ -43,6 +71,23 @@ type weightsResult struct {
 
 // Passed reports whether the generation's held-out gate accepted it.
 func (g Gen) Passed() bool { return strings.EqualFold(g.Verdict, "PASS") }
+
+// metricLabel reports the human label and direction caption for a series. When
+// any gen carries accuracy the series is an accuracy series (higher is better);
+// otherwise it is a test_loss series (lower is better). An empty series defaults
+// to test_loss so the captured fallback keeps its established wording.
+func metricLabel(gens []Gen) (axis, caption, headline string, higherBetter bool) {
+	for _, g := range gens {
+		if g.HasAccuracy {
+			return "held-out accuracy (higher = better)",
+				"held-out accuracy · higher is better",
+				"best accuracy", true
+		}
+	}
+	return "held-out test_loss (lower = better)",
+		"held-out test_loss · lower is better",
+		"best test_loss", false
+}
 
 // poll scans runsRoot for run_N/gen_M/results.json and returns the series sorted
 // by (run, gen). It returns (series, true) when a live tree yields at least one
@@ -85,41 +130,56 @@ func poll(runsRoot string) ([]Gen, bool) {
 	if len(gens) == 0 {
 		return nil, false
 	}
+	sortGens(gens)
+	return gens, true
+}
+
+func sortGens(gens []Gen) {
 	sort.Slice(gens, func(i, j int) bool {
 		if gens[i].Run != gens[j].Run {
 			return gens[i].Run < gens[j].Run
 		}
 		return gens[i].Gen < gens[j].Gen
 	})
-	return gens, true
 }
 
-// readResults parses one results.json. The "has test_loss" distinction comes from
+// readResults parses one results.json. The "has X" distinction comes from
 // re-decoding into a raw map: omitempty means a regressing-but-untrained gen can
-// legitimately lack the field, and we must render a gap, not zero.
+// legitimately lack a metric field, and we must render a gap, not zero.
 func readResults(path string, runN, genM int) (Gen, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Gen{}, false
 	}
+	return decodeResult(data, runN, genM)
+}
+
+// decodeResult turns one results.json blob into a Gen. It is shared by the live
+// poller and the replay engine so both read exactly the same schema.
+func decodeResult(data []byte, runN, genM int) (Gen, bool) {
 	var wr weightsResult
 	if err := json.Unmarshal(data, &wr); err != nil {
 		return Gen{}, false
 	}
-	// Detect presence of test_loss independently of its (possibly zero) value.
+	// Detect field presence independently of the (possibly zero) value.
 	var raw map[string]json.RawMessage
 	_ = json.Unmarshal(data, &raw)
 	_, hasLoss := raw["test_loss"]
+	_, hasAcc := raw["accuracy"]
 	return Gen{
-		Run:        runN,
-		Gen:        genM,
-		Verdict:    wr.Verdict,
-		Trained:    wr.Trained,
-		TestLoss:   wr.TestLoss,
-		HasLoss:    hasLoss && wr.TestLoss > 0,
-		Perplexity: wr.Perplexity,
-		Metric:     wr.Metric,
-		Reason:     wr.Reason,
+		Run:         runN,
+		Gen:         genM,
+		Verdict:     wr.Verdict,
+		Trained:     wr.Trained,
+		TestLoss:    wr.TestLoss,
+		HasLoss:     hasLoss && wr.TestLoss > 0,
+		Accuracy:    wr.Accuracy,
+		HasAccuracy: hasAcc,
+		Correct:     wr.Correct,
+		Total:       wr.Total,
+		Perplexity:  wr.Perplexity,
+		Metric:      wr.Metric,
+		Reason:      wr.Reason,
 	}, true
 }
 
@@ -135,11 +195,10 @@ func suffixInt(name, prefix string) (int, bool) {
 	return n, true
 }
 
-// capturedSeries is the real, canonical P6 weight-loop run (run_1, 3 gens) from
-// /tmp/p6-weightloop-FINAL.md. It is used only when no live run tree is readable,
-// so the demo still renders the true numbers (never fabricated) when the run
-// trees have been cleaned. gen1 generalizes best; gen2/gen3 overfit and the
-// held-out gate REVISEs them.
+// capturedSeries is the real, canonical P6 weight-loop run (run_1, 3 gens). It is
+// used only when no live run tree is readable, so the demo still renders the true
+// numbers (never fabricated) when the run trees have been cleaned. gen1 generalizes
+// best; gen2/gen3 overfit and the held-out gate REVISEs them.
 func capturedSeries() []Gen {
 	return []Gen{
 		{Run: 1, Gen: 1, Verdict: "PASS", Trained: true, TestLoss: 2.4423, HasLoss: true, Perplexity: 11.50, Metric: "test_loss",
@@ -151,20 +210,44 @@ func capturedSeries() []Gen {
 	}
 }
 
-// bestSoFar returns the lowest test_loss (and its gen) among trained gens with a
-// present test_loss, scanning only up to and including index i (causal). ok is
-// false when no such gen exists yet.
-func bestSoFar(gens []Gen, i int) (gen int, loss float64, ok bool) {
+// bestSoFar returns the best metric value (and its gen) among trained gens with a
+// present value, scanning only up to and including index i (causal). Direction
+// follows the series: accuracy maximizes, test_loss minimizes. ok is false when
+// no such gen exists yet.
+func bestSoFar(gens []Gen, i int) (gen int, val float64, ok bool) {
+	_, _, _, higher := metricLabel(gens)
 	for j := 0; j <= i && j < len(gens); j++ {
 		g := gens[j]
-		if !g.Trained || !g.HasLoss {
+		if !g.Trained {
 			continue
 		}
-		if !ok || g.TestLoss < loss {
-			gen, loss, ok = g.Gen, g.TestLoss, true
+		v, has := g.Value()
+		if !has {
+			continue
+		}
+		if !ok || better(v, val, higher) {
+			gen, val, ok = g.Gen, v, true
 		}
 	}
 	return
+}
+
+// better reports whether candidate c improves on the current best b for the
+// series direction (higher==true => larger is better).
+func better(c, b float64, higher bool) bool {
+	if higher {
+		return c > b
+	}
+	return c < b
+}
+
+// worse reports whether candidate c is strictly worse than best b for the series
+// direction. Equal is not worse (a tie holds the best, not a regression).
+func worse(c, b float64, higher bool) bool {
+	if higher {
+		return c < b
+	}
+	return c > b
 }
 
 // fingerprint is a cheap change token for the series: the poller compares it
@@ -172,7 +255,8 @@ func bestSoFar(gens []Gen, i int) (gen int, loss float64, ok bool) {
 func fingerprint(gens []Gen) string {
 	var b strings.Builder
 	for _, g := range gens {
-		fmt.Fprintf(&b, "%d/%d:%s:%v:%.4f:%v;", g.Run, g.Gen, g.Verdict, g.Trained, g.TestLoss, g.HasLoss)
+		v, _ := g.Value()
+		fmt.Fprintf(&b, "%d/%d:%s:%v:%.4f:%v%v;", g.Run, g.Gen, g.Verdict, g.Trained, v, g.HasLoss, g.HasAccuracy)
 	}
 	return b.String()
 }

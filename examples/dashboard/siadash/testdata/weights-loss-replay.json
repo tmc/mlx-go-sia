@@ -1,0 +1,43 @@
+{
+  "title": "weight-loop (held-out test_loss)",
+  "steps": [
+    {
+      "gen": 1,
+      "delay_s": 0.0,
+      "results": {
+        "verdict": "PASS",
+        "trained": true,
+        "test_loss": 2.3401,
+        "perplexity": 10.382274738296031,
+        "metric": "test_loss",
+        "held_out_dir": "/tmp/sia-live-runs3/_heldout/run_1"
+      }
+    },
+    {
+      "gen": 2,
+      "delay_s": 20.0,
+      "results": {
+        "verdict": "REVISE",
+        "trained": true,
+        "test_loss": 2.653,
+        "perplexity": 14.196564518226808,
+        "metric": "test_loss",
+        "reason": "held-out test_loss 2.6530 > best-so-far 2.3401 (gen 1): overfitting, rejected",
+        "held_out_dir": "/tmp/sia-live-runs3/_heldout/run_1"
+      }
+    },
+    {
+      "gen": 3,
+      "delay_s": 20.0,
+      "results": {
+        "verdict": "REVISE",
+        "trained": true,
+        "test_loss": 2.6883,
+        "perplexity": 14.70665334659186,
+        "metric": "test_loss",
+        "reason": "held-out test_loss 2.6883 > best-so-far 2.3401 (gen 1): overfitting, rejected",
+        "held_out_dir": "/tmp/sia-live-runs3/_heldout/run_1"
+      }
+    }
+  ]
+}

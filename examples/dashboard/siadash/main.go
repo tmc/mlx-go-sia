@@ -75,13 +75,15 @@ var (
 // reflects an actual scan and the gauge tracks a recorded loss; nothing animates
 // from data that does not exist.
 type store struct {
-	mu      sync.Mutex
-	gens    []Gen
-	live    bool // true => read from a live run tree, false => captured fallback
-	version *swiftui.IntState
+	mu          sync.Mutex
+	gens        []Gen
+	live        bool   // true => read from a live run tree (or replay), false => captured fallback
+	replay      bool   // true => data is a recorded fixture replayed over time
+	replayTitle string // fixture title, shown in the header when replay is true
+	version     *swiftui.IntState
 
 	pulse      *swiftui.BoolState  // toggled every poll tick: liveness heartbeat
-	latestLoss *swiftui.FloatState // newest plotted test_loss, set animated
+	latestLoss *swiftui.FloatState // newest plotted metric value, set animated
 	verdict    *swiftui.IntState   // bumps when the newest generation changes
 }
 
@@ -117,7 +119,9 @@ func (s *store) syncLive() {
 		return
 	}
 	latest := pts[len(pts)-1]
-	s.latestLoss.SetAnimated(latest.TestLoss)
+	if v, ok := latest.Value(); ok {
+		s.latestLoss.SetAnimated(v)
+	}
 	if latest.Gen != s.verdict.Get() {
 		s.verdict.SetAnimatedWith(latest.Gen, swiftui.AnimationBouncy)
 	}
@@ -156,6 +160,56 @@ func (s *piStore) get() PiSnapshot {
 	return s.snap
 }
 
+// streamPi reveals the pi feed one entry at a time over time so the right panel
+// visibly flows: each new row appears at the top and the aggregate counters
+// tick up to include only what has been revealed. The data is the real recorded
+// pi feed (full); revealing it progressively makes a finished session read like a
+// live stream without inventing anything — a hidden row is simply not shown yet.
+// It plays through once and holds the full feed; the heartbeat keeps pulsing.
+func (s *piStore) streamPi(full PiSnapshot, interval time.Duration) {
+	if !full.Agg.Found || len(full.Feed) == 0 {
+		s.set(full)
+		s.syncLive()
+		s.version.Set(s.version.Get() + 1)
+		return
+	}
+	for n := 1; n <= len(full.Feed); n++ {
+		s.set(revealPi(full, n))
+		s.syncLive()
+		s.version.Set(s.version.Get() + 1)
+		if n < len(full.Feed) {
+			time.Sleep(interval)
+		}
+	}
+}
+
+// revealPi returns a snapshot showing only the first n feed entries, with the
+// aggregate strip recomputed to reflect just those entries so the counters climb
+// honestly as the feed streams. Token totals are held from the full fold (the
+// per-entry breakdown is not available), but turns and tool calls are counted
+// from the revealed rows so the headline activity numbers grow with the feed.
+func revealPi(full PiSnapshot, n int) PiSnapshot {
+	if n > len(full.Feed) {
+		n = len(full.Feed)
+	}
+	feed := full.Feed[:n]
+	agg := full.Agg
+	agg.ToolBreak = map[string]int{}
+	turns, tools := 0, 0
+	for _, e := range feed {
+		if e.Role == "user" {
+			turns++
+		}
+		if e.Kind == "tool_use" {
+			tools++
+			agg.ToolBreak[e.Tool]++
+		}
+	}
+	agg.Turns = turns
+	agg.ToolCalls = tools
+	return PiSnapshot{Agg: agg, Feed: feed, Error: full.Error}
+}
+
 // syncLive pushes the folded tool-call and user-turn totals into their animated
 // counters so the right panel's numbers tick up to a new total rather than
 // snapping. Both are real folds across the scanned sessions; when no pi dir is
@@ -173,6 +227,8 @@ func main() {
 	runsRoot := flag.String("runs", defaultRunsRoot, "runs-localtrain root to tail (run_N/gen_M/results.json)")
 	piDir := flag.String("pi-dir", "", "pi sessions dir to scan (default: ~/.pi/agent/sessions via cc; PI_CODING_AGENT_DIR honored)")
 	interval := flag.Duration("interval", 800*time.Millisecond, "poll interval")
+	replayPath := flag.String("replay", "", "replay a recorded run fixture (JSON) gen-by-gen over time instead of tailing -runs")
+	speed := flag.Float64("speed", 1, "replay speed multiplier (>1 compresses the recorded cadence)")
 	flag.Parse()
 
 	st := &store{
@@ -188,63 +244,127 @@ func main() {
 		turns:     swiftui.NewFloatState(0),
 	}
 
-	// Initial training load: prefer the live tree, fall back to the captured series.
-	if gens, ok := poll(*runsRoot); ok {
+	// Replay mode: animate a recorded run from a fixture instead of tailing a live
+	// tree. The data is real recorded results.json, revealed over time at the run's
+	// own (speed-scaled) cadence; the header tags it REPLAY so it is never confused
+	// with a live tail. Replay sets st.replay so the header can label it.
+	var rep *replayer
+	if *replayPath != "" {
+		f, err := loadReplay(*replayPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		rep = newReplayer(f, *speed, st)
+		st.replay = true
+		st.replayTitle = f.Title
+		st.set(f.gens(1), true) // seed with the first generation
+	} else if gens, ok := poll(*runsRoot); ok {
+		// Initial training load: prefer the live tree, fall back to the captured series.
 		st.set(gens, true)
 	} else {
 		st.set(capturedSeries(), false)
 	}
 	st.syncLive() // seed the gauge/verdict from the initial series
 
-	// Initial pi load.
+	// Initial pi load. In replay mode the feed is streamed in (revealed row by row)
+	// by the pi goroutine below, so seed an empty feed here; otherwise show the full
+	// scan immediately.
 	ctx := context.Background()
-	pst.set(pollPi(ctx, *piDir))
+	piFull := pollPi(ctx, *piDir)
+	if rep != nil {
+		seed := piFull
+		seed.Feed = nil
+		if seed.Agg.Found {
+			seed.Agg.Turns, seed.Agg.ToolCalls = 0, 0
+			seed.Agg.ToolBreak = map[string]int{}
+		}
+		pst.set(seed)
+	} else {
+		pst.set(piFull)
+	}
 	pst.syncLive()
 
-	// Background training poller: re-scan the tree and bump version only when the
-	// series actually changes, so the chart animates as a run appears/advances.
+	// Heartbeat ticker: pulse the left panel's live dot every interval regardless
+	// of mode, so the panel visibly scans. In replay mode the replayer drives the
+	// data; in live mode the poller below does.
 	go func() {
-		last := func() string { g, _ := st.snapshot(); return fingerprint(g) }()
 		tick := time.NewTicker(*interval)
 		defer tick.Stop()
 		for range tick.C {
-			st.beat() // heartbeat on every scan, data-changed or not
-			gens, ok := poll(*runsRoot)
-			live := true
-			if !ok {
-				gens, live = capturedSeries(), false
-			}
-			fp := fingerprint(gens)
-			if fp == last {
-				continue
-			}
-			last = fp
-			st.set(gens, live)
-			st.syncLive() // animate the gauge/headline and reflash the verdict
-			st.version.Set(st.version.Get() + 1)
+			st.beat()
 		}
 	}()
 
-	// Background pi poller: re-scan the pi sessions dir and bump version only when
-	// the pi data fingerprint moves, so the right panel updates live as sessions
-	// appear/disappear or new entries land — without a restart.
+	if rep != nil {
+		go rep.run()
+	} else {
+		// Background training poller: re-scan the tree and bump version only when the
+		// series actually changes, so the chart animates as a run appears/advances.
+		go func() {
+			last := func() string { g, _ := st.snapshot(); return fingerprint(g) }()
+			tick := time.NewTicker(*interval)
+			defer tick.Stop()
+			for range tick.C {
+				gens, ok := poll(*runsRoot)
+				live := true
+				if !ok {
+					gens, live = capturedSeries(), false
+				}
+				fp := fingerprint(gens)
+				if fp == last {
+					continue
+				}
+				last = fp
+				st.set(gens, live)
+				st.syncLive() // animate the gauge/headline and reflash the verdict
+				st.version.Set(st.version.Get() + 1)
+			}
+		}()
+	}
+
+	// Pi heartbeat: pulse the right panel's live dot every interval so it visibly
+	// scans regardless of mode.
 	go func() {
-		last := piFingerprint(pst.get())
 		tick := time.NewTicker(*interval)
 		defer tick.Stop()
 		for range tick.C {
-			pst.beat() // heartbeat on every scan, data-changed or not
-			snap := pollPi(ctx, *piDir)
-			fp := piFingerprint(snap)
-			if fp == last {
-				continue
-			}
-			last = fp
-			pst.set(snap)
-			pst.syncLive() // animate the tool-call / turn counters to new totals
-			pst.version.Set(pst.version.Get() + 1)
+			pst.beat()
 		}
 	}()
+
+	if rep != nil {
+		// Replay mode: stream the recorded pi feed in row by row so the activity
+		// panel visibly FLOWS — each entry appears at the bottom and the counters
+		// tick up — then holds the full feed. The reveal cadence is the poll interval
+		// scaled by the replay speed so it keeps pace with the left-panel climb.
+		go func() {
+			step := time.Duration(float64(*interval) / *speed)
+			if step < 250*time.Millisecond {
+				step = 250 * time.Millisecond
+			}
+			pst.streamPi(piFull, step)
+		}()
+	} else {
+		// Background pi poller: re-scan the pi sessions dir and bump version only when
+		// the pi data fingerprint moves, so the right panel updates live as sessions
+		// appear/disappear or new entries land — without a restart.
+		go func() {
+			last := piFingerprint(pst.get())
+			tick := time.NewTicker(*interval)
+			defer tick.Stop()
+			for range tick.C {
+				snap := pollPi(ctx, *piDir)
+				fp := piFingerprint(snap)
+				if fp == last {
+					continue
+				}
+				last = fp
+				pst.set(snap)
+				pst.syncLive() // animate the tool-call / turn counters to new totals
+				pst.version.Set(pst.version.Get() + 1)
+			}
+		}()
+	}
 
 	left := swiftui.VStackSpaced(14,
 		header(st),
@@ -278,13 +398,26 @@ func main() {
 func header(st *store) swiftui.View {
 	return swiftui.DynamicView(st.version, func(_ int) swiftui.View {
 		gens, live := st.snapshot()
+		st.mu.Lock()
+		replay, replayTitle := st.replay, st.replayTitle
+		st.mu.Unlock()
 		// Captured fallback is a hardcoded recorded snapshot, NOT a live
 		// measurement — flag it unmistakably (red, "NOT LIVE") so the numbers on
-		// screen can never be mistaken for a fresh run.
+		// screen can never be mistaken for a fresh run. Replay is real recorded
+		// data shown over time; it is tagged REPLAY (blue) so it is distinct from
+		// both a live tail and the captured fallback.
 		src := "⚠ hardcoded snapshot — point -runs at a run tree"
 		dot, tag := red, "CAPTURED · NOT LIVE"
-		if live {
+		switch {
+		case replay:
+			src, dot, tag = "replaying recorded run: "+replayTitle, blue, "REPLAY · RECORDED"
+		case live:
 			src, dot, tag = "tailing run tree", green, "LIVE"
+		}
+		_, _, headlineLabel, higher := metricLabel(gens)
+		blurb := "Held-out cross-entropy per generation. Lower is better — a rising line means the model is overfitting and getting worse on data it never saw."
+		if higher {
+			blurb = "Held-out accuracy per generation. Higher is better — the held-out gate accepts a generation only when it improves on the best so far."
 		}
 		best := "-"
 		if g, l, ok := overallBest(gens); ok {
@@ -299,12 +432,12 @@ func header(st *store) swiftui.View {
 				heartbeat(st.pulse, dot, tag, src),
 			),
 			swiftui.HStack(
-				swiftui.Text("Held-out cross-entropy per generation. Lower is better — a rising line means the model is overfitting and getting worse on data it never saw.").
+				swiftui.Text(blurb).
 					Font(swiftui.FontCallout).
 					ForegroundStyleNamed("secondary").
 					LineLimit(0),
 				swiftui.Spacer(),
-				swiftui.Text("best test_loss: "+best).
+				swiftui.Text(headlineLabel+": "+best).
 					Font(swiftui.FontCallout).
 					FontWeight(swiftui.WeightSemibold).
 					MonospacedDigit(),
@@ -349,9 +482,10 @@ func heartbeat(pulse *swiftui.BoolState, dot swiftui.Color, tag, src string) swi
 }
 
 func body(st *store, gens []Gen, live bool, runsRoot string) swiftui.View {
+	axis, _, _, _ := metricLabel(gens)
 	return swiftui.VStackSpaced(14,
 		liveStrip(st, gens),
-		swiftui.GroupBox("Held-out test_loss (lower = better)",
+		swiftui.GroupBox(axis,
 			chartCard(gens),
 		).MaxFrame(-1, 0),
 		swiftui.GroupBox("Agent activity",
@@ -369,10 +503,11 @@ func body(st *store, gens []Gen, live bool, runsRoot string) swiftui.View {
 // generation yet the strip renders an explicit waiting state.
 func liveStrip(st *store, gens []Gen) swiftui.View {
 	pts := plottable(gens)
+	_, caption, _, _ := metricLabel(gens)
 	if len(pts) == 0 {
 		return swiftui.HStackSpaced(10,
 			swiftui.Image("hourglass").ForegroundStyleNamed("secondary"),
-			swiftui.Text("Waiting for the first trained generation with a held-out test_loss…").
+			swiftui.Text("Waiting for the first trained generation with a held-out metric…").
 				Font(swiftui.FontCallout).ForegroundStyleNamed("secondary"),
 			swiftui.Spacer(),
 		).Padding(12).
@@ -381,7 +516,7 @@ func liveStrip(st *store, gens []Gen) swiftui.View {
 	}
 
 	latest := pts[len(pts)-1]
-	loMin, loMax := lossRange(pts)
+	loMin, loMax := valueRange(pts)
 	// Pad the gauge range so the needle sits inside the dial, not pinned to an end.
 	span := loMax - loMin
 	if span < 0.05 {
@@ -389,15 +524,19 @@ func liveStrip(st *store, gens []Gen) swiftui.View {
 	}
 	gMin, gMax := loMin-span*0.4, loMax+span*0.4
 
+	metricWord := "test_loss"
+	if latest.HigherBetter() {
+		metricWord = "accuracy"
+	}
 	gauge := swiftui.AnimatedDynamicFloatView(st.latestLoss, swiftui.TransitionOpacity, func(v float64) swiftui.View {
 		return swiftui.VStackSpaced(4,
-			swiftui.FloatGauge(fmt.Sprintf("gen %d test_loss", latest.Gen), st.latestLoss, gMin, gMax),
+			swiftui.FloatGauge(fmt.Sprintf("gen %d %s", latest.Gen, metricWord), st.latestLoss, gMin, gMax),
 			swiftui.Text(fmt.Sprintf("%.4f", v)).
 				Font(swiftui.FontTitle2).
 				FontWeight(swiftui.WeightBold).
 				MonospacedDigit().
 				ForegroundStyle(rgba(verdictColor(latest), 1)),
-			swiftui.Text("held-out test_loss · lower is better").
+			swiftui.Text(caption).
 				Font(swiftui.FontCaption2).
 				ForegroundStyleNamed("secondary"),
 		)
@@ -463,49 +602,60 @@ func verdictTile(g Gen) swiftui.View {
 }
 
 // chartCard builds the live line chart. PASS gens are green circles, REVISE gens
-// are red diamonds; a connecting line runs through gens that have a test_loss.
-// Gens without a test_loss are simply omitted (a gap), never plotted as zero.
+// are red diamonds; a connecting line runs through gens that carry a metric value.
+// Gens without a value are simply omitted (a gap), never plotted as zero. The Y
+// axis follows whichever metric the run emits (accuracy higher=better or test_loss
+// lower=better).
 func chartCard(gens []Gen) swiftui.View {
+	axis, _, _, _ := metricLabel(gens)
 	if len(plottable(gens)) == 0 {
 		return swiftui.VStackSpaced(8,
 			swiftui.Spacer(),
 			swiftui.Image("hourglass").ForegroundStyleNamed("secondary").ImageScale(swiftui.ImageScaleLarge),
-			swiftui.Text("Waiting for a trained generation with a held-out test_loss...").
+			swiftui.Text("Waiting for a trained generation with a held-out metric...").
 				Font(swiftui.FontCallout).ForegroundStyleNamed("secondary"),
 			swiftui.Spacer(),
 		).Frame(0, 300).Padding(12)
 	}
 
 	pts := plottable(gens)
-	loMin, loMax := lossRange(pts)
+	loMin, loMax := valueRange(pts)
+	yKey := "test_loss"
+	for _, g := range pts {
+		if g.HigherBetter() {
+			yKey = "accuracy"
+			break
+		}
+	}
 	maxGen := 0
 	for _, g := range pts {
 		if g.Gen > maxGen {
 			maxGen = g.Gen
 		}
 	}
+	val := func(g Gen) float64 { v, _ := g.Value(); return v }
 
 	marks := make([]charts.Mark, 0, len(pts)*3+1)
 	// Translucent area fill under the curve, drawn first so the line and points sit
 	// on top. The fill gives the live chart depth without obscuring the data; it
-	// traces the same recorded losses as the line, never an invented baseline.
+	// traces the same recorded values as the line, never an invented baseline.
 	for _, g := range pts {
 		marks = append(marks,
 			charts.AreaMark(
 				charts.XInt("Generation", g.Gen),
-				charts.YFloat("test_loss", g.TestLoss),
+				charts.YFloat(yKey, val(g)),
 			).
 				ForegroundStyle(blue).
 				Interpolation(charts.InterpolationMonotone).
 				Opacity(0.16),
 		)
 	}
-	// Connecting line across all gens that have a loss (drawn over the area fill).
+	// Connecting line across all gens that have a value (drawn over the area fill).
 	for _, g := range pts {
 		marks = append(marks,
 			charts.LineMark(
 				charts.XInt("Generation", g.Gen),
-				charts.YFloat("test_loss", g.TestLoss),
+				charts.YFloat(yKey, val(g)),
 			).
 				ForegroundStyle(muted).
 				Interpolation(charts.InterpolationMonotone).
@@ -521,13 +671,13 @@ func chartCard(gens []Gen) swiftui.View {
 		}
 		pt := charts.PointMark(
 			charts.XInt("Generation", g.Gen),
-			charts.YFloat("test_loss", g.TestLoss),
+			charts.YFloat(yKey, val(g)),
 		).
 			ForegroundStyleBy("verdict", series).
 			Symbol(sym).
 			SymbolSize(150).
 			ZIndex(5)
-		pt = pt.TextAnnotation(fmt.Sprintf("gen %d: %.4f", g.Gen, g.TestLoss), charts.AnnotationTop)
+		pt = pt.TextAnnotation(fmt.Sprintf("gen %d: %.4f", g.Gen, val(g)), charts.AnnotationTop)
 		marks = append(marks, pt)
 	}
 	// Best-so-far reference line: the bar the gate holds new gens to.
@@ -553,7 +703,7 @@ func chartCard(gens []Gen) swiftui.View {
 		).
 		ChartLegend(charts.LegendVisible(charts.LegendPositionTop, charts.LegendAlignmentLeading, 8)).
 		ChartXAxisLabel("generation").
-		ChartYAxisLabel("held-out test_loss (lower = better)")
+		ChartYAxisLabel(axis)
 
 	// Re-render once on appear so the native chart lays out at full size.
 	version := swiftui.NewIntState(0)
@@ -589,8 +739,13 @@ func activityRow(g Gen, gens []Gen, i int) swiftui.View {
 		badgeColor, icon = amber, "exclamationmark.triangle.fill"
 	}
 
-	metric := "test_loss n/a (gap)"
-	if g.HasLoss {
+	metric := "metric n/a (gap)"
+	if g.HasAccuracy {
+		metric = fmt.Sprintf("accuracy %.4f", g.Accuracy)
+		if g.Total > 0 {
+			metric += fmt.Sprintf("  (%d/%d)", g.Correct, g.Total)
+		}
+	} else if g.HasLoss {
 		metric = fmt.Sprintf("test_loss %.4f", g.TestLoss)
 		if g.Perplexity > 0 {
 			metric += fmt.Sprintf("  ppl %.2f", g.Perplexity)
@@ -599,11 +754,15 @@ func activityRow(g Gen, gens []Gen, i int) swiftui.View {
 
 	reason := g.Reason
 	if reason == "" {
-		if best, l, ok := bestSoFar(gens, i); ok && g.HasLoss {
-			if g.TestLoss <= l {
-				reason = fmt.Sprintf("new best (<= prior best %.4f from gen %d)", l, best)
+		_, _, _, higher := metricLabel(gens)
+		v, has := g.Value()
+		if best, l, ok := bestSoFar(gens, i); ok && has {
+			if !worse(v, l, higher) {
+				reason = fmt.Sprintf("new best (vs prior best %.4f from gen %d)", l, best)
+			} else if higher {
+				reason = fmt.Sprintf("held-out %.4f < best-so-far %.4f (gen %d): no improvement, rejected", v, l, best)
 			} else {
-				reason = fmt.Sprintf("held-out %.4f > best-so-far %.4f (gen %d): overfitting, rejected", g.TestLoss, l, best)
+				reason = fmt.Sprintf("held-out %.4f > best-so-far %.4f (gen %d): overfitting, rejected", v, l, best)
 			}
 		} else {
 			reason = "no prior baseline to compare against"
@@ -648,39 +807,51 @@ func noteRow(text string) swiftui.View {
 	).Padding(8).BackgroundRoundedRect(rgba(amber, 0.10), 8)
 }
 
-// plottable returns gens that have a present, positive test_loss (the only ones
-// that belong on the chart). Gens without a loss are gaps, not zeros.
+// plottable returns gens that carry a present metric value (the only ones that
+// belong on the chart). Gens without a value are gaps, not zeros.
 func plottable(gens []Gen) []Gen {
 	out := make([]Gen, 0, len(gens))
 	for _, g := range gens {
-		if g.HasLoss && g.TestLoss > 0 {
+		if _, ok := g.Value(); ok {
 			out = append(out, g)
 		}
 	}
 	return out
 }
 
-func lossRange(gens []Gen) (min, max float64) {
-	min, max = gens[0].TestLoss, gens[0].TestLoss
+// valueRange returns the min and max plotted metric value across gens.
+func valueRange(gens []Gen) (min, max float64) {
+	first := true
 	for _, g := range gens {
-		if g.TestLoss < min {
-			min = g.TestLoss
+		v, ok := g.Value()
+		if !ok {
+			continue
 		}
-		if g.TestLoss > max {
-			max = g.TestLoss
+		if first {
+			min, max, first = v, v, false
+			continue
+		}
+		if v < min {
+			min = v
+		}
+		if v > max {
+			max = v
 		}
 	}
 	return
 }
 
-// overallBest returns the lowest test_loss across the whole series.
-func overallBest(gens []Gen) (gen int, loss float64, ok bool) {
+// overallBest returns the best metric value across the whole series, respecting
+// the series direction (accuracy maximizes, test_loss minimizes).
+func overallBest(gens []Gen) (gen int, val float64, ok bool) {
+	_, _, _, higher := metricLabel(gens)
 	for _, g := range gens {
-		if !g.HasLoss || g.TestLoss <= 0 {
+		v, has := g.Value()
+		if !has {
 			continue
 		}
-		if !ok || g.TestLoss < loss {
-			gen, loss, ok = g.Gen, g.TestLoss, true
+		if !ok || better(v, val, higher) {
+			gen, val, ok = g.Gen, v, true
 		}
 	}
 	return
@@ -732,8 +903,8 @@ func piBody(pst *piStore, snap PiSnapshot) swiftui.View {
 			piAggregateStrip(pst, snap.Agg),
 		).MaxFrame(-1, 0),
 		toolBarCard(snap.Agg),
-		swiftui.GroupBox("Live activity feed (newest last)",
-			piFeedPanel(snap),
+		swiftui.GroupBox("Live activity feed (newest first)",
+			piFeedPanel(pst, snap),
 		).MaxFrame(-1, -1),
 	)
 }
@@ -875,7 +1046,12 @@ func toolBarCard(a PiAgg) swiftui.View {
 
 // piFeedPanel renders the live activity rows, newest last. An empty feed shows
 // an explicit empty state; rows never invent data.
-func piFeedPanel(snap PiSnapshot) swiftui.View {
+// piFeedPanel renders the activity feed NEWEST FIRST (top), so fresh events land
+// at the top of the scrollback like a live console. The newest row is wrapped in
+// an AnimatedDynamicView keyed on the feed-top trigger, so each new entry slides
+// in from the top rather than appearing instantly — the visible "flow" of live
+// activity. Older rows render statically below it.
+func piFeedPanel(pst *piStore, snap PiSnapshot) swiftui.View {
 	rows := make([]swiftui.Viewable, 0, len(snap.Feed)+1)
 	if snap.Error != "" {
 		rows = append(rows, noteRow("pi scan error: "+snap.Error))
@@ -885,8 +1061,15 @@ func piFeedPanel(snap PiSnapshot) swiftui.View {
 	} else if len(snap.Feed) == 0 {
 		rows = append(rows, noteRow("pi dir present but no parsed activity yet."))
 	}
-	for _, e := range snap.Feed {
-		rows = append(rows, piFeedRow(e))
+
+	// Reverse the feed so the newest entry is first (top). The whole feed is
+	// rebuilt under the panel's DynamicView each time a row is revealed, so the new
+	// top row appears on every stream step; the heartbeat and counter easing supply
+	// the live motion. (A per-row AnimatedDynamicView closure crashes the purego
+	// bridge here, so the entrance flash lives at the panel level via version bumps.)
+	feed := snap.Feed
+	for i := len(feed) - 1; i >= 0; i-- {
+		rows = append(rows, piFeedRow(feed[i]))
 	}
 	return swiftui.ScrollView(
 		swiftui.VStackSpaced(8, rows...).Padding(10),
