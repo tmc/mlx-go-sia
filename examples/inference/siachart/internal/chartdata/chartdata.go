@@ -1,8 +1,8 @@
 // Package chartdata reads a SIA run tree's per-generation results.json files and
 // renders the throughput series two ways: a terminal sparkline+table for the
 // live demo, and a CSV for gnuplot or a spreadsheet. It is the demo-side reader
-// for the ThroughputEvaluator's output, shared by P3 (cmd/inferopt) and P7
-// (cmd/metalopt), which write the same results.json schema.
+// for the ThroughputEvaluator's output, shared by P3 (inferopt) and P7
+// (metalopt), which write the same results.json schema.
 //
 // The reported metric is the gen-N − gen-0 delta the evaluator already computed
 // (cancelling thermal/cache drift); charts plot the delta or speedup, with the

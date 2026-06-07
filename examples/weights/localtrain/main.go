@@ -8,10 +8,10 @@
 // This is the T1-RECORDED tier of the demo: it is runnable, but a live training
 // run heats the GPU and a multi-minute training loop has no place adjacent to
 // the P3 inference benchmark (thermal drift fakes benchmark wins). Record it;
-// do not run it live next to cmd/inferopt.
+// do not run it live next to the inferopt demo.
 //
 // By default it runs with -dry-run (scaffolds data + spec, uses a no-op engine,
-// and skips the GPU training/eval) so `go run ./cmd/localtrain` is a green
+// and skips the GPU training/eval) so `go run ./examples/weights/localtrain` is a green
 // self-test. Drop -dry-run with -agent-cmd/-engine and a base model to do a real
 // local LoRA generation.
 //
@@ -207,7 +207,10 @@ func resolvePiScript(explicit string) (string, error) {
 		}
 		return abs, nil
 	}
-	for _, rel := range []string{"scripts/pi-mlx", "../../scripts/pi-mlx"} {
+	// Run from the repo root (go run ./examples/weights/localtrain) the wrapper
+	// is at scripts/pi-mlx; run from this command's source dir it is three
+	// levels up.
+	for _, rel := range []string{"scripts/pi-mlx", "../../../scripts/pi-mlx"} {
 		if abs, err := filepath.Abs(rel); err == nil {
 			if _, statErr := os.Stat(abs); statErr == nil {
 				log.Printf("pi-mlx: using repo wrapper %s (not on PATH)", abs)

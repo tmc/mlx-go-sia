@@ -13,9 +13,9 @@ or `speedup`, which cancels thermal/cache drift).
 
 ## Run
 
-    go run ./cmd/inferopt                                   # self-test: seed-only, no engine, no model
-    go run ./cmd/inferopt -engine pi -max-gen 6             # fully offline via pi-mlx
-    go run ./cmd/inferopt -agent-cmd claude -agent-args '-p,--model,%MODEL%' -max-gen 6
+    go run ./examples/inference/inferopt                                   # self-test: seed-only, no engine, no model
+    go run ./examples/inference/inferopt -engine pi -max-gen 6             # fully offline via pi-mlx
+    go run ./examples/inference/inferopt -agent-cmd claude -agent-args '-p,--model,%MODEL%' -max-gen 6
 
 ## Honesty
 

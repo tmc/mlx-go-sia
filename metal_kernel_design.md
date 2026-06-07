@@ -10,7 +10,7 @@ goes up is real GPU-kernel speed on Apple silicon.
 - `metal_kernel.go`     — starter kernel source, fixed-seed inputs, Go golden oracle, RMSNorm spec
 - `metal_executor.go`   — `MetalKernelExecutor` (`sia.TargetExecutor`): JIT-compile + run the gen's source
 - `metal_benchmarker.go`— `KernelBenchmarker` (`sia.Benchmarker`): Correct / RunCandidate / RunBaseline / Unit
-- `cmd/metalopt/main.go` — self-contained orchestrator wiring
+- `examples/metal/metalopt/main.go` — self-contained orchestrator wiring
 - `*_test.go`           — roundtrip, compile-failure→Success:false, oracle, benchmarker
 
 ## Chosen starter kernel: fused RMSNorm

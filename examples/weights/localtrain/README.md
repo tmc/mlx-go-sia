@@ -9,14 +9,14 @@ REVISES any generation that regresses.
 
 This is the **T1-RECORDED** tier: a live training run heats the GPU, and the
 thermal drift fakes inference-benchmark wins — so do not run it live next to
-`cmd/inferopt` (P3). Record it.
+`inferopt` (P3). Record it.
 
 ## Run
 
-    go run ./cmd/localtrain                                 # dry-run self-test (no GPU)
+    go run ./examples/weights/localtrain                   # dry-run self-test (no GPU)
 
     # The multi-gen weight-improvement loop (RECORDED, T1) — verified command:
-    go run ./cmd/localtrain -dry-run=false -engine scripted -max-gen 3 \
+    go run ./examples/weights/localtrain -dry-run=false -engine scripted -max-gen 3 \
         -runs-root ./runs-localtrain -run-id 1 \
         -model mlx-community/Qwen3-0.6B-4bit
 
@@ -24,7 +24,7 @@ Default is `-dry-run` (scaffold + wire, skip the GPU) so the no-flag form is a
 green self-test. Drop `-dry-run` for real generations.
 
 Engines: `-engine scripted` walks a deterministic spec-tuning ladder (the
-labeled-honest fallback, like `cmd/inferopt`'s scripted engine — see below);
+labeled-honest fallback, like `inferopt`'s scripted engine — see below);
 `-engine pi` / `-agent-cmd claude` let an LLM tune the hyperparameters (the
 offline `pi` 1B may rewrite the declarative spec into invalid Python — `scripted`
 is the reliable record); the no-op engine (no `-engine`) trains the clean seed
@@ -53,7 +53,7 @@ but the overfit-caught shape is stable.) The dataset is for the mechanism, not a
 benchmark; the number is honest, just not competitive.
 
 Use a separate `-runs-root` (e.g. `./runs-localtrain`) so the LoRA adapter
-binaries and data trees do not collide with a P3 `cmd/inferopt` run under
+binaries and data trees do not collide with a P3 `inferopt` run under
 `./runs`. Note `./runs` is gitignored but `./runs-localtrain` is not — clean it
 (and never stage the `.safetensors`).
 

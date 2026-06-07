@@ -446,7 +446,7 @@ func genHeader(maxGen int) string {
 }
 
 // reportCapture prints the terminal-style per-generation series for one
-// prototype, matching the house style of cmd/inferopt/report.go: a compact
+// prototype, matching the house style of inferopt's report.go: a compact
 // table read straight from each generation's results.json.
 func reportCapture(layout sia.RunLayout, p captureProto, maxGen int) {
 	fmt.Printf("  %-4s %-7s %-9s %-7s %s\n", "gen", "verdict", "advisory", "blkrs", "newly-cleared evidence (honest recompute)")

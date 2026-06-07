@@ -26,8 +26,8 @@
 //
 // Usage:
 //
-//	go run ./cmd/leakguard-demo                 # hermetic, fast, demoable
-//	go run ./cmd/leakguard-demo -train-bin mlx-lm-train -base mlx-community/Qwen3-0.6B-4bit
+//	go run ./examples/weights/leakguard-demo                 # hermetic, fast, demoable
+//	go run ./examples/weights/leakguard-demo -train-bin mlx-lm-train -base mlx-community/Qwen3-0.6B-4bit
 package main
 
 import (

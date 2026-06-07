@@ -62,7 +62,7 @@ green):
 - `runner_helpers.go` `newTokenReplacer` adds **`%BASEURL%`**, **`%APIKEY_ENV%`**,
   and **`%APIKEY%`** (the last reads the secret from `Provider.APIKeyEnv` via
   `os.Getenv` at substitution time). `%MODEL%`/`%MAXTURNS%`/`%WORKDIR%` unchanged.
-- `cmd/sia/main.go` `providerEnv()` (line 177) sets `ExecRunner.Env`: for an
+- `examples/core/sia/main.go` `providerEnv()` (line 177) sets `ExecRunner.Env`: for an
   OpenAI-compatible provider with a `base_url`, it exports **`OPENAI_BASE_URL`**
   and mirrors the resolved key onto **`OPENAI_API_KEY`**; returns nil for native
   providers (so the `claude`/Anthropic path is unchanged).
@@ -100,12 +100,11 @@ export OPENAI_API_KEY=$NEBIUS_API_KEY
 ### Ready-to-run 1-gen loop against Nebius
 
 ```bash
-cd .../mlx-go-examples/mlx-go-sia
 export NEBIUS_API_KEY=...
 export OPENAI_BASE_URL=https://api.tokenfactory.us-central1.nebius.com/v1/
 export OPENAI_API_KEY=$NEBIUS_API_KEY
 
-go run ./cmd/sia \
+go run ./examples/core/sia \
   -task-dir ./tasks/mytask -run-id 1 -max-gen 1 \
   -meta-agent-profile kimi-nebius-meta \
   -target-agent-profile qwen-nebius-target \
@@ -117,7 +116,7 @@ Dry-run first (writes the full `runs/run_1/gen_1/` tree + prompts, **no model
 calls, no credits burned**):
 
 ```bash
-go run ./cmd/sia -task-dir ./tasks/mytask -run-id 1 -max-gen 1 \
+go run ./examples/core/sia -task-dir ./tasks/mytask -run-id 1 -max-gen 1 \
   -meta-agent-profile kimi-nebius-meta -target-agent-profile qwen-nebius-target -dry-run
 ```
 

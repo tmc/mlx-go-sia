@@ -2,7 +2,7 @@
 // each generation's results.json (written by the ThroughputEvaluator) from a
 // run tree and emits a terminal sparkline+table for the live view and, with
 // -csv, a CSV for gnuplot or a spreadsheet. It works for any run that writes the
-// shared results.json schema — P3 (cmd/inferopt) and P7 (cmd/metalopt) alike.
+// shared results.json schema — P3 (inferopt) and P7 (metalopt) alike.
 //
 // Usage:
 //

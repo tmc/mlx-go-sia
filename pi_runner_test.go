@@ -156,8 +156,8 @@ func TestPiRunnerMissingScript(t *testing.T) {
 	}
 }
 
-// TestPiRunnerScriptPathResolution documents the integration rule consumers in
-// cmd/ rely on: because the wrapper runs in the request's working directory (a
+// TestPiRunnerScriptPathResolution documents the integration rule the example
+// commands rely on: because the wrapper runs in the request's working directory (a
 // run/generation dir), a relative Script resolves against that dir — not the
 // repository — and is not found, while an absolute Script works from any
 // working directory.

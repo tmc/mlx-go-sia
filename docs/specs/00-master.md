@@ -91,7 +91,7 @@ and a returned **Go error aborts the whole run** — so our evaluators must repo
 task failure via `EvalResult.Status` (`EvalError`/`EvalWarning`), never a Go
 error. (`EvalError` is for the evaluator being unable to run; a `REVISE`/failed
 task is still `EvalSuccess` with the verdict inside `results.json`.) The CLI uses
-the same seam: `var eval sia.Evaluator = sia.NopEvaluator{}` (cmd/sia/main.go:122).
+the same seam: `var eval sia.Evaluator = sia.NopEvaluator{}` (examples/core/sia/main.go:128).
 This is the injection point all of P1/P3/P4 use.
 
 Module path: `github.com/tmc/mlx-go-sia`, a member of `mlx-go-examples/go.work`.

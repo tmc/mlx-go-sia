@@ -9,7 +9,7 @@
 //
 // It is self-contained: with no flags it scaffolds a synthetic sampler-optimization
 // task, captures the golden oracle outside the agent's reach, and runs with a
-// no-op engine (the seed candidate as gen-0) so `go run ./cmd/inferopt` produces
+// no-op engine (the seed candidate as gen-0) so `go run ./examples/inference/inferopt` produces
 // a real, gradable run with no model download. Point -agent-cmd at the claude
 // CLI, or -engine pi at the offline pi-mlx wrapper, to let an agent actually
 // optimize the sampler.
@@ -190,8 +190,10 @@ func resolvePiScript(explicit string) (string, error) {
 		}
 		return abs, nil
 	}
-	// cmd/inferopt → repo root is two levels up; scripts/pi-mlx sits there.
-	for _, rel := range []string{"scripts/pi-mlx", "../../scripts/pi-mlx"} {
+	// Run from the repo root (go run ./examples/inference/inferopt) the wrapper
+	// is at scripts/pi-mlx; run from this command's source dir it is three
+	// levels up.
+	for _, rel := range []string{"scripts/pi-mlx", "../../../scripts/pi-mlx"} {
 		if abs, err := filepath.Abs(rel); err == nil {
 			if _, statErr := os.Stat(abs); statErr == nil {
 				log.Printf("pi-mlx: using repo wrapper %s (not on PATH)", abs)

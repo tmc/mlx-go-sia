@@ -16,7 +16,7 @@ import (
 // Each generation it writes a revised train.py — a real step on a tuning ladder a
 // competent meta-agent would walk after reading the held-out signal — so the
 // weight-improvement loop runs end-to-end and reproducibly. It is the labeled
-// fallback the P6 demo uses, the same pattern as cmd/inferopt's scripted engine.
+// fallback the P6 demo uses, the same pattern as inferopt's scripted engine.
 //
 // It is NOT a cheat on the held-out gate: every spec it writes is trained for
 // real on-device by mlx-lm-train and scored by the WeightsEvaluator on a test set

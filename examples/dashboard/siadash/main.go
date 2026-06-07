@@ -32,7 +32,7 @@
 //
 // Usage:
 //
-//	go run ./cmd/siadash [-runs DIR] [-pi-dir DIR] [-interval 800ms]
+//	go run ./examples/dashboard/siadash [-runs DIR] [-pi-dir DIR] [-interval 800ms]
 package main
 
 import (
