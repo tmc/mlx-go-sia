@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/tmc/localtinker/tinker"
-	"github.com/tmc/mlx-go-sia/localtrain"
-	"github.com/tmc/mlx-go-sia/traindata"
+	"github.com/tmc/sia-apple-silicon/localtrain"
+	"github.com/tmc/sia-apple-silicon/traindata"
 )
 
 // testRegistry resolves a single fake local model.

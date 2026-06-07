@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/tmc/mlx-go-experiments/renderer"
-	sia "github.com/tmc/mlx-go-sia"
-	"github.com/tmc/mlx-go-sia/traindata"
+	sia "github.com/tmc/sia-apple-silicon"
+	"github.com/tmc/sia-apple-silicon/traindata"
 )
 
 var update = flag.Bool("update", false, "update golden files")

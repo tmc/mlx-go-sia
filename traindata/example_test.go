@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	sia "github.com/tmc/mlx-go-sia"
-	"github.com/tmc/mlx-go-sia/traindata"
+	sia "github.com/tmc/sia-apple-silicon"
+	"github.com/tmc/sia-apple-silicon/traindata"
 )
 
 // Example renders a recorded single-trajectory execution into one training

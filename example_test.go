@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	sia "github.com/tmc/mlx-go-sia"
+	sia "github.com/tmc/sia-apple-silicon"
 )
 
 // Example runs a two-generation self-improvement loop with a scripted engine and

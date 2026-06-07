@@ -3,8 +3,8 @@ package localtrain_test
 import (
 	"testing"
 
-	"github.com/tmc/mlx-go-sia/localtrain"
-	"github.com/tmc/mlx-go-sia/traindata"
+	"github.com/tmc/sia-apple-silicon/localtrain"
+	"github.com/tmc/sia-apple-silicon/traindata"
 )
 
 func TestDatumFromSample(t *testing.T) {
