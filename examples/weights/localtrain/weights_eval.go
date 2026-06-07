@@ -46,6 +46,12 @@ type WeightsEvaluator struct {
 	// the executor wrote the trained adapter. Defaults to "adapters" (matching
 	// MLXTrainExecutor).
 	AdapterSubdir string
+	// Metric selects the held-out score. "" or "test_loss" (the default) parses a
+	// generalization loss from an adapter-aware mlx-lm-train eval — lower is
+	// better. "accuracy" instead generates a label per held-out row with the
+	// trained adapter and reports correct/total — higher is better. The accuracy
+	// path mirrors upstream SIA's LawBench evaluator (pred_label == label).
+	Metric string
 	// TestBatches caps the test batches (-1 = all). Defaults to -1.
 	TestBatches int
 	// Env is extra environment appended to os.Environ for the eval process.
@@ -56,16 +62,37 @@ type WeightsEvaluator struct {
 }
 
 // weightsResults is the results.json schema for a weights generation. The
-// top-level scalars flow to the feedback agent; lower held-out loss is better,
-// so improvement is a decreasing test_loss across generations.
+// top-level scalars flow to the feedback agent. In the default test_loss metric
+// a lower held-out loss is better, so improvement is a decreasing test_loss
+// across generations. In the accuracy metric (Metric: "accuracy") the trained
+// model labels each held-out row and the score is correct/total in [0,1] — a
+// number that goes UP, mirroring upstream SIA's LawBench evaluator.
 type weightsResults struct {
 	Verdict    string  `json:"verdict"`
 	Trained    bool    `json:"trained"`
 	TestLoss   float64 `json:"test_loss,omitempty"`
 	Perplexity float64 `json:"perplexity,omitempty"`
+	Accuracy   float64 `json:"accuracy,omitempty"`
+	Correct    int     `json:"correct,omitempty"`
+	Total      int     `json:"total,omitempty"`
 	Metric     string  `json:"metric"`
 	Reason     string  `json:"reason,omitempty"`
 	HeldOut    string  `json:"held_out_dir"`
+}
+
+// The held-out metrics. metricTestLoss (the default) is a decreasing
+// generalization loss; metricAccuracy is an increasing correct/total share.
+const (
+	metricTestLoss = "test_loss"
+	metricAccuracy = "accuracy"
+)
+
+// metric returns the selected held-out metric, defaulting to test_loss.
+func (e *WeightsEvaluator) metric() string {
+	if e.Metric == metricAccuracy {
+		return metricAccuracy
+	}
+	return metricTestLoss
 }
 
 // Evaluate loads the generation's trained adapter and scores it on the held-out
@@ -83,10 +110,11 @@ func (e *WeightsEvaluator) Evaluate(ctx context.Context, genDir string) (sia.Eva
 		sub = "adapters"
 	}
 	adapterDir := filepath.Join(genDir, sub)
+	metric := e.metric()
 
 	if e.DryRun {
 		return e.write(genDir, weightsResults{
-			Verdict: "SKIPPED", Trained: false, Metric: "test_loss",
+			Verdict: "SKIPPED", Trained: false, Metric: metric,
 			Reason:  "dry-run: held-out eval not executed (no training/GPU)",
 			HeldOut: e.HeldOutDir,
 		})
@@ -95,10 +123,14 @@ func (e *WeightsEvaluator) Evaluate(ctx context.Context, genDir string) (sia.Eva
 	if !isDir(adapterDir) {
 		// No adapter produced (training did not run or failed): report as feedback.
 		return e.write(genDir, weightsResults{
-			Verdict: "REVISE", Trained: false, Metric: "test_loss",
+			Verdict: "REVISE", Trained: false, Metric: metric,
 			Reason:  fmt.Sprintf("no trained adapter at %s; training likely failed", adapterDir),
 			HeldOut: e.HeldOutDir,
 		})
+	}
+
+	if metric == metricAccuracy {
+		return e.evaluateAccuracy(ctx, genDir, adapterDir)
 	}
 
 	loss, out, err := e.evalHeldOut(ctx, adapterDir)
@@ -106,7 +138,7 @@ func (e *WeightsEvaluator) Evaluate(ctx context.Context, genDir string) (sia.Eva
 	_ = os.WriteFile(logPath, []byte(out), 0o644)
 	if err != nil {
 		return e.write(genDir, weightsResults{
-			Verdict: "REVISE", Trained: true, Metric: "test_loss",
+			Verdict: "REVISE", Trained: true, Metric: metric,
 			Reason:  fmt.Sprintf("held-out eval failed: %v", err),
 			HeldOut: e.HeldOutDir,
 		})
@@ -117,7 +149,7 @@ func (e *WeightsEvaluator) Evaluate(ctx context.Context, genDir string) (sia.Eva
 		Trained:    true,
 		TestLoss:   loss,
 		Perplexity: perplexity(loss),
-		Metric:     "test_loss",
+		Metric:     metric,
 		HeldOut:    e.HeldOutDir,
 	}
 	// The held-out gate is the hero: a generation that trains and evaluates fine
@@ -156,6 +188,272 @@ func (e *WeightsEvaluator) bestPriorLoss(genDir string) (bestGen int, bestLoss f
 		}
 	}
 	return bestGen, bestLoss, ok
+}
+
+// evaluateAccuracy scores the trained adapter on the held-out set the upstream
+// LawBench way: for each held-out row it builds the prompt with the label
+// WITHHELD, generates a few tokens with the trained adapter attached, and counts
+// a row correct when the generated label equals the true label. accuracy =
+// correct/total in [0,1] — higher is better. The model never saw these rows, so
+// it is a real generalization measurement, not memorization.
+func (e *WeightsEvaluator) evaluateAccuracy(ctx context.Context, genDir, adapterDir string) (sia.EvalResult, error) {
+	samples, err := readHeldOutSamples(filepath.Join(e.HeldOutDir, "test.jsonl"))
+	if err != nil {
+		return e.write(genDir, weightsResults{
+			Verdict: "REVISE", Trained: true, Metric: metricAccuracy,
+			Reason:  fmt.Sprintf("held-out accuracy eval failed: %v", err),
+			HeldOut: e.HeldOutDir,
+		})
+	}
+
+	// Read the trained adapter's architecture so the generation attaches the SAME
+	// shape. mlx-lm-train defaults to 16 layers / rank 8 when these are unset, and
+	// a shape mismatch loads the wrong (or no) adapter — silently scoring a model
+	// that is not the one trained. Honesty requires the eval match the rung.
+	cfg, err := readAdapterConfig(filepath.Join(adapterDir, "adapter_config.json"))
+	if err != nil {
+		return e.write(genDir, weightsResults{
+			Verdict: "REVISE", Trained: true, Metric: metricAccuracy,
+			Reason:  fmt.Sprintf("held-out accuracy eval failed: read adapter config: %v", err),
+			HeldOut: e.HeldOutDir,
+		})
+	}
+
+	var log strings.Builder
+	correct := 0
+	for i, s := range samples {
+		pred, out, perr := e.predictLabel(ctx, adapterDir, cfg, s.prompt)
+		fmt.Fprintf(&log, "row %d: want=%q pred=%q ok=%v\n%s\n", i, s.label, pred, pred == s.label, out)
+		if perr != nil {
+			return e.write(genDir, weightsResults{
+				Verdict: "REVISE", Trained: true, Metric: metricAccuracy,
+				Reason:  fmt.Sprintf("held-out accuracy eval failed on row %d: %v", i, perr),
+				HeldOut: e.HeldOutDir,
+			})
+		}
+		if pred == s.label {
+			correct++
+		}
+	}
+	_ = os.WriteFile(filepath.Join(genDir, sia.NameEvalLog), []byte(log.String()), 0o644)
+
+	total := len(samples)
+	acc := 0.0
+	if total > 0 {
+		acc = float64(correct) / float64(total)
+	}
+	res := weightsResults{
+		Verdict:  "PASS",
+		Trained:  true,
+		Accuracy: acc,
+		Correct:  correct,
+		Total:    total,
+		Metric:   metricAccuracy,
+		HeldOut:  e.HeldOutDir,
+	}
+	// Higher-is-better gate (mirror of the loss gate, inverted): a generation
+	// whose held-out accuracy is LOWER than the best of all strictly-prior
+	// generations has regressed and must not be silently blessed. The lookup is
+	// causal — generation N reads only generations 1..N-1 — so a later result can
+	// never retroactively change an earlier verdict. A new best (or gen 1, which
+	// has no prior) stays PASS.
+	if bestGen, bestAcc, ok := e.bestPriorAccuracy(genDir); ok && acc < bestAcc {
+		res.Verdict = "REVISE"
+		res.Reason = fmt.Sprintf("held-out accuracy %.4f < best-so-far %.4f (gen %d): regressed, rejected", acc, bestAcc, bestGen)
+	}
+	return e.write(genDir, res)
+}
+
+// bestPriorAccuracy scans the results.json of every generation strictly before
+// the one at genDir and returns the highest held-out accuracy found and the
+// generation that produced it. It reads only earlier generations (causal: gen N
+// sees gen 1..N-1), so a verdict never depends on a future result. ok is false
+// when genDir is not a gen_N directory or no prior generation has a usable score.
+func (e *WeightsEvaluator) bestPriorAccuracy(genDir string) (bestGen int, bestAcc float64, ok bool) {
+	gen := genFromWorkingDir(genDir)
+	if gen <= 1 {
+		return 0, 0, false // gen 1 (or unparsable) has no prior to compare against
+	}
+	runDir := filepath.Dir(genDir)
+	for prev := 1; prev < gen; prev++ {
+		wr, err := readWeightsResults(filepath.Join(runDir, fmt.Sprintf("gen_%d", prev), sia.NameResultsJSON))
+		if err != nil || !wr.Trained || wr.Total <= 0 {
+			continue // skip generations that did not produce a usable accuracy
+		}
+		if !ok || wr.Accuracy > bestAcc {
+			bestGen, bestAcc, ok = prev, wr.Accuracy, true
+		}
+	}
+	return bestGen, bestAcc, ok
+}
+
+// predictLabel generates a label for one held-out prompt with the trained
+// adapter attached, returning the parsed label ("positive"/"negative", or "" if
+// neither was generated) and the raw output.
+//
+// mlx-lm-generate cannot attach a LoRA adapter (it has no -adapter-path /
+// -resume-adapter-file flag), and mlx-lm-fuse mis-handles the 4-bit quantized
+// base (it drops the untouched and scale/bias tensors, yielding an unloadable
+// model). The only tool that attaches and resumes the adapter for generation is
+// mlx-lm-train's sample-generation hook. We run it with -learning-rate 0 and
+// -iters 1: the single step is a no-op (zero LR moves no weights), so the sample
+// reflects the PURE resumed adapter, while -gen-every 1 fires the generation.
+// -save-every is set huge so the no-op step never rewrites the saved adapter.
+// cfg carries the adapter's layer count and rank so the attached shape matches
+// the trained adapter (a mismatch silently loads the wrong weights).
+func (e *WeightsEvaluator) predictLabel(ctx context.Context, adapterDir string, cfg adapterConfig, prompt string) (string, string, error) {
+	bin := e.TrainBin
+	if bin == "" {
+		bin = "mlx-lm-train"
+	}
+	args := []string{
+		"-train", "-iters", "1",
+		"-learning-rate", "0",
+		"-batch-size", "2",
+		"-save-every", "1000000",
+		"-model", e.BaseModel,
+		"-data", e.HeldOutDir,
+		"-adapter-path", adapterDir,
+		"-resume-adapter-file", filepath.Join(adapterDir, "adapters.safetensors"),
+		"-num-layers", strconv.Itoa(cfg.NumLayers),
+		"-lora-rank", strconv.Itoa(cfg.LoRAParameters.Rank),
+		"-gen-every", "1",
+		"-gen-prompt", prompt,
+		"-gen-tokens", "4",
+	}
+
+	var buf bytes.Buffer
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	cmd.Env = append(os.Environ(), e.Env...)
+	if runErr := cmd.Run(); runErr != nil {
+		return "", buf.String(), fmt.Errorf("%v", runErr)
+	}
+	out := buf.String()
+	return parsePredictedLabel(out, prompt), out, nil
+}
+
+// genSampleRe captures the quoted sample mlx-lm-train emits at -gen-every: an
+// `Iter N: "<prompt + generation>"` block whose body spans multiple lines.
+var genSampleRe = regexp.MustCompile(`(?s)Iter\s+\d+:\s*"(.*?)"`)
+
+// parsePredictedLabel extracts the model's predicted label from a sample
+// generation. mlx-lm-train echoes the prompt plus the continuation inside the
+// quoted Iter block; the prompt withholds the label, so the first "positive" or
+// "negative" appearing AFTER the prompt is the model's prediction. It returns
+// "" when neither label was generated.
+func parsePredictedLabel(out, prompt string) string {
+	body := out
+	if m := genSampleRe.FindStringSubmatch(out); m != nil {
+		body = m[1]
+	}
+	// Strip the echoed prompt so a stray label word in the sentence cannot be
+	// mistaken for the prediction; the prompt itself withholds the label.
+	if i := strings.LastIndex(body, "Sentiment:"); i >= 0 {
+		body = body[i+len("Sentiment:"):]
+	} else if i := strings.Index(body, prompt); i >= 0 {
+		body = body[i+len(prompt):]
+	}
+	body = strings.ToLower(body)
+	pos := strings.Index(body, "positive")
+	neg := strings.Index(body, "negative")
+	switch {
+	case pos < 0 && neg < 0:
+		return ""
+	case neg < 0:
+		return "positive"
+	case pos < 0:
+		return "negative"
+	case pos < neg:
+		return "positive"
+	default:
+		return "negative"
+	}
+}
+
+// adapterConfig mirrors the adapter_config.json mlx-lm-train writes beside the
+// adapter weights: the layer count and LoRA rank the generation trained with.
+// The eval must reattach the SAME shape or the resume loads the wrong weights.
+type adapterConfig struct {
+	NumLayers      int `json:"num_layers"`
+	LoRAParameters struct {
+		Rank int `json:"rank"`
+	} `json:"lora_parameters"`
+}
+
+// readAdapterConfig loads the trained adapter's architecture. It defaults a
+// missing layer count or rank to mlx-lm-train's own defaults (16 layers, rank
+// 8) so an older adapter without the field still attaches.
+func readAdapterConfig(path string) (adapterConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return adapterConfig{}, err
+	}
+	var cfg adapterConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return adapterConfig{}, fmt.Errorf("parse adapter config: %w", err)
+	}
+	if cfg.NumLayers == 0 {
+		cfg.NumLayers = 16
+	}
+	if cfg.LoRAParameters.Rank == 0 {
+		cfg.LoRAParameters.Rank = 8
+	}
+	return cfg, nil
+}
+
+// heldOutSample is one held-out row: the prompt with its label withheld plus the
+// true label to score against.
+type heldOutSample struct {
+	prompt string
+	label  string
+}
+
+// labelLineRe splits a scaffolded "text" row into its sentence prompt and label.
+// Rows are "Classify the sentiment.\nSentence: <text>\nSentiment: <label>"; the
+// prompt is everything through "Sentiment:" (label withheld), the label the tail.
+var labelLineRe = regexp.MustCompile(`(?s)^(.*Sentiment:)\s*(\w+)\s*$`)
+
+// readHeldOutSamples loads the held-out test.jsonl and returns each row as a
+// prompt (label withheld) plus its true label, ready to score for accuracy.
+func readHeldOutSamples(path string) ([]heldOutSample, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var samples []heldOutSample
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var row struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, fmt.Errorf("parse held-out row: %w", err)
+		}
+		m := labelLineRe.FindStringSubmatch(row.Text)
+		if m == nil {
+			return nil, fmt.Errorf("held-out row missing 'Sentiment: <label>': %q", row.Text)
+		}
+		samples = append(samples, heldOutSample{
+			prompt: strings.TrimRight(m[1], " "),
+			label:  strings.ToLower(m[2]),
+		})
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	if len(samples) == 0 {
+		return nil, fmt.Errorf("no held-out rows in %s", path)
+	}
+	return samples, nil
 }
 
 // evalHeldOut runs mlx-lm-train in eval-only mode (-test, no -train) with the

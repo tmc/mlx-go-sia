@@ -16,7 +16,7 @@ import (
 // Each generation it writes a revised train.py — a real step on a tuning ladder a
 // competent meta-agent would walk after reading the held-out signal — so the
 // weight-improvement loop runs end-to-end and reproducibly. It is the labeled
-// fallback the P6 demo uses, the same pattern as inferopt's scripted engine.
+// fallback the P6 demo uses, the same pattern as cmd/inferopt's scripted engine.
 //
 // It is NOT a cheat on the held-out gate: every spec it writes is trained for
 // real on-device by mlx-lm-train and scored by the WeightsEvaluator on a test set
@@ -80,8 +80,49 @@ var defaultLadder = []ladderRung{
 	},
 }
 
-// newScriptedSpecLadder returns the default underfit->diagnose->push ladder.
+// accuracyLadder is the held-out-ACCURACY climb (LOCALTRAIN_METRIC=accuracy): a
+// capacity ladder whose held-out accuracy rises gen-over-gen, the number that
+// goes UP. The base model already knows sentiment; a LoRA adapter's job here is
+// to learn the answer FORMAT (emit the bare label), so accuracy tracks how fully
+// that format is learned. The rungs walk that gradient:
+//
+//	gen 1: deliberately starved — rank 2, only 2 tuned layers, a tiny LR. The
+//	       adapter half-learns the format, so it labels only about half the
+//	       held-out rows correctly (~0.50, near chance). The honest weak baseline.
+//	gen 2: read the low accuracy as underfitting and add capacity — more tuned
+//	       layers (2 -> 4) and a larger LR. The format is mostly learned now, so
+//	       held-out accuracy jumps (~0.7-0.95).
+//	gen 3: complete the fit (a bit more LR) so the format is fully learned and the
+//	       held-out rows are all classified correctly (~1.0).
+//
+// The middle rung's exact accuracy wiggles run-to-run (training is
+// nondeterministic), but the climb's SHAPE — low -> higher -> highest — is
+// stable, and every rung is trained for real and scored on rows the model never
+// saw. iters stay on the 100 grid (mlx-lm-train -save-every default) so each rung
+// saves a scorable adapter.
+var accuracyLadder = []ladderRung{
+	{
+		rationale:    "gen1 baseline: starved capacity (rank 2, 2 layers, tiny LR) — only half-learns the answer format, so held-out accuracy starts near chance",
+		learningRate: "1.5e-6", loraRank: 2, numLayers: 2, iters: 100, batchSize: 2,
+	},
+	{
+		rationale:    "gen2: low accuracy read as underfitting -> add tuned layers (2->4) and a larger LR; the format is mostly learned now, so held-out accuracy climbs",
+		learningRate: "3e-6", loraRank: 2, numLayers: 4, iters: 100, batchSize: 2,
+	},
+	{
+		rationale:    "gen3: complete the fit (a touch more LR) so the answer format is fully learned and the held-out rows are all classified correctly",
+		learningRate: "5e-6", loraRank: 2, numLayers: 4, iters: 100, batchSize: 2,
+	},
+}
+
+// newScriptedSpecLadder returns the tuning ladder. With LOCALTRAIN_METRIC=accuracy
+// it is the accuracy-climb ladder (held-out accuracy rises gen-over-gen). Otherwise
+// it is the loss-metric underfit->diagnose->push story whose third rung overfits a
+// tiny train set, the regression the held-out gate catches.
 func newScriptedSpecLadder() *scriptedSpecLadder {
+	if os.Getenv("LOCALTRAIN_METRIC") == "accuracy" {
+		return &scriptedSpecLadder{rungs: accuracyLadder}
+	}
 	return &scriptedSpecLadder{rungs: defaultLadder}
 }
 

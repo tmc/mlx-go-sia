@@ -8,10 +8,10 @@
 // This is the T1-RECORDED tier of the demo: it is runnable, but a live training
 // run heats the GPU and a multi-minute training loop has no place adjacent to
 // the P3 inference benchmark (thermal drift fakes benchmark wins). Record it;
-// do not run it live next to the inferopt demo.
+// do not run it live next to cmd/inferopt.
 //
 // By default it runs with -dry-run (scaffolds data + spec, uses a no-op engine,
-// and skips the GPU training/eval) so `go run ./examples/weights/localtrain` is a green
+// and skips the GPU training/eval) so `go run ./cmd/localtrain` is a green
 // self-test. Drop -dry-run with -agent-cmd/-engine and a base model to do a real
 // local LoRA generation.
 //
@@ -109,6 +109,10 @@ func run(argv []string) error {
 		BaseModel:  *model,
 		HeldOutDir: heldOutDir,
 		DryRun:     *dryRun,
+		// LOCALTRAIN_METRIC=accuracy switches the held-out score from a decreasing
+		// generalization loss to an increasing correct/total accuracy (a number
+		// that goes UP), the upstream-LawBench-style metric.
+		Metric: os.Getenv("LOCALTRAIN_METRIC"),
 	}
 
 	log.Printf("engine=%s model=%s max-gen=%d dry-run=%v", engineName, *model, *maxGen, *dryRun)
@@ -207,10 +211,7 @@ func resolvePiScript(explicit string) (string, error) {
 		}
 		return abs, nil
 	}
-	// Run from the repo root (go run ./examples/weights/localtrain) the wrapper
-	// is at scripts/pi-mlx; run from this command's source dir it is three
-	// levels up.
-	for _, rel := range []string{"scripts/pi-mlx", "../../../scripts/pi-mlx"} {
+	for _, rel := range []string{"scripts/pi-mlx", "../../scripts/pi-mlx"} {
 		if abs, err := filepath.Abs(rel); err == nil {
 			if _, statErr := os.Stat(abs); statErr == nil {
 				log.Printf("pi-mlx: using repo wrapper %s (not on PATH)", abs)
@@ -236,15 +237,28 @@ func splitArgs(s string) []string {
 }
 
 // reportWeights prints the held-out metric series from each generation's
-// results.json — the demo's "loss goes down across generations" story.
+// results.json — the demo's "the number moves across generations" story. In
+// accuracy mode it prints the rising correct/total share; otherwise the falling
+// held-out loss.
 func reportWeights(layout sia.RunLayout, res sia.RunResult) {
+	accuracyMode := os.Getenv("LOCALTRAIN_METRIC") == "accuracy"
 	fmt.Println()
-	fmt.Println("P6 held-out metric series (lower test_loss is better):")
-	fmt.Printf("  %-5s %-8s %-8s %-12s %-12s\n", "gen", "verdict", "trained", "test_loss", "perplexity")
+	if accuracyMode {
+		fmt.Println("P6 held-out metric series (higher accuracy is better):")
+		fmt.Printf("  %-5s %-8s %-8s %-12s %-10s\n", "gen", "verdict", "trained", "accuracy", "correct")
+	} else {
+		fmt.Println("P6 held-out metric series (lower test_loss is better):")
+		fmt.Printf("  %-5s %-8s %-8s %-12s %-12s\n", "gen", "verdict", "trained", "test_loss", "perplexity")
+	}
 	for _, g := range res.Generations {
 		wr, err := readWeightsResults(layout.ResultsJSON(g.Gen))
 		if err != nil {
 			fmt.Printf("  %-5d (no results.json: %v)\n", g.Gen, err)
+			continue
+		}
+		if accuracyMode {
+			fmt.Printf("  %-5d %-8s %-8v %-12.4f %-10s %s\n",
+				g.Gen, wr.Verdict, wr.Trained, wr.Accuracy, fmt.Sprintf("%d/%d", wr.Correct, wr.Total), wr.Reason)
 			continue
 		}
 		fmt.Printf("  %-5d %-8s %-8v %-12.4f %-12.3f %s\n",
