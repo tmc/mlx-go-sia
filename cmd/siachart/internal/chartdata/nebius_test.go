@@ -242,6 +242,43 @@ func TestNebiusRenderShowsRealWin(t *testing.T) {
 	}
 }
 
+// TestNebiusRenderSlower pins the third speed flavor (the real pi-agent headline):
+// a correct PASS recorded below 1.0 is shown as a regression that the gate credits
+// for correctness but not speed — never "parity", never a win. This is the
+// strongest anti-Goodhart point: the gate visibly declines to credit a regression.
+func TestNebiusRenderSlower(t *testing.T) {
+	s := NebiusSeries{Model: "pi-agent → DeepSeek", Gens: []Gen{
+		nbPass(1, 0.6979, nbDist(182.817, 402.48), nbDist(296.074, 776.588)),
+		nbRevise(2, "candidate did not run: exit status 1: # command-line-arguments\n/tmp/x/gen_2/candidate.go:205:5: declared and not used: maxIdx"),
+		nbRevise(3, "candidate did not run: exit status 1: # command-line-arguments\n/tmp/x/gen_3/candidate.go:153:12: undefined: time"),
+	}}
+	var b strings.Builder
+	if err := s.Render(&b); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := b.String()
+	wantPresent := []string{
+		"0.70x — slower, a regression (no credit)", // the slower speed cell
+		"credited for correctness, not speed",      // the what-happened note
+		"declared and not used: maxIdx",            // gen2 real bug
+		"undefined: time",                          // gen3 real bug
+		"credited 0 measurable speedup",            // gate gave out no win
+	}
+	for _, w := range wantPresent {
+		if !strings.Contains(out, w) {
+			t.Errorf("render missing %q\n--- got ---\n%s", w, out)
+		}
+	}
+	// The gen_1 PASS row must not be labelled parity (the header explains the
+	// parity rule, so check the row, not the whole output).
+	if strings.Contains(out, "parity — ranges overlap") {
+		t.Errorf("a recorded-slower PASS must not read as parity\n--- got ---\n%s", out)
+	}
+	if strings.Contains(out, "x win") {
+		t.Errorf("a slower PASS must never claim a win\n--- got ---\n%s", out)
+	}
+}
+
 // TestNebiusCSVParity asserts the CSV carries the data-derived speed verdict and
 // is_real_win, not the recorded scalar alone — so a downstream consumer reads the
 // same honest call as the table.
