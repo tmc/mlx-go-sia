@@ -31,6 +31,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	sia "github.com/tmc/mlx-go-sia"
 )
@@ -131,7 +132,11 @@ func run(argv []string) error {
 	// fall back to the task's evaluate.py, or skip.
 	var eval sia.Evaluator = sia.NopEvaluator{}
 	if script := taskLayout.EvaluateScript(); script != "" && !*dryRun {
-		eval = &sia.ExecEvaluator{Script: script, Interpreter: *evalCmd}
+		eval = &sia.ExecEvaluator{
+			Script:      script,
+			Interpreter: *evalCmd,
+			Timeout:     time.Duration(cfg.EvalTimeout) * time.Second,
+		}
 	}
 
 	orch := &sia.Orchestrator{

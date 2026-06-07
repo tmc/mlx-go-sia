@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 // EvalStatus classifies an evaluation outcome, mirroring the reference's status
@@ -60,6 +61,10 @@ type ExecEvaluator struct {
 	Interpreter string
 	// Env is extra environment appended to os.Environ.
 	Env []string
+	// Timeout bounds a single evaluate.py run. A hung or runaway evaluator is
+	// killed once it elapses (the reference passes EVAL_TIMEOUT to subprocess.run
+	// for the same reason). Zero means no bound beyond the caller's context.
+	Timeout time.Duration
 }
 
 // Evaluate runs evaluate.py against genDir.
@@ -75,6 +80,12 @@ func (e *ExecEvaluator) Evaluate(ctx context.Context, genDir string) (EvalResult
 		args = append(args, e.Script)
 	}
 	args = append(args, "--gen-dir", genDir)
+
+	if e.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.Timeout)
+		defer cancel()
+	}
 
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, name, args...)
