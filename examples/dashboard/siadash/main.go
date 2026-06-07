@@ -65,12 +65,29 @@ var (
 // store holds the latest polled series behind a mutex. The ticker writes it; the
 // SwiftUI builder (driven by DynamicView) reads a snapshot. version is the
 // observable counter that triggers a rebuild whenever the data fingerprint moves.
+//
+// The remaining states drive the live flash. pulse toggles on every poll tick
+// (data-changed or not) so a heartbeat dot animates each scan, proving the panel
+// is live. latestLoss tracks the newest plotted test_loss and is set with an
+// easing animation so a sweeping gauge and the headline number glide to a new
+// generation rather than snapping. verdict bumps only when the newest generation
+// changes, retriggering the PASS/REVISE flash. Every value is real: the heartbeat
+// reflects an actual scan and the gauge tracks a recorded loss; nothing animates
+// from data that does not exist.
 type store struct {
 	mu      sync.Mutex
 	gens    []Gen
 	live    bool // true => read from a live run tree, false => captured fallback
 	version *swiftui.IntState
+
+	pulse      *swiftui.BoolState  // toggled every poll tick: liveness heartbeat
+	latestLoss *swiftui.FloatState // newest plotted test_loss, set animated
+	verdict    *swiftui.IntState   // bumps when the newest generation changes
 }
+
+// beat toggles the heartbeat on every poll tick so the live indicator animates
+// each scan, even when the underlying series is unchanged.
+func (s *store) beat() { s.pulse.SetAnimated(!s.pulse.Get()) }
 
 func (s *store) set(gens []Gen, live bool) {
 	s.mu.Lock()
@@ -87,14 +104,45 @@ func (s *store) snapshot() ([]Gen, bool) {
 	return out, s.live
 }
 
+// syncLive pushes the newest plotted test_loss into the animated gauge and bumps
+// the verdict trigger when the latest generation changed. The loss is set with an
+// easing animation so the gauge and headline glide to the new value; the verdict
+// bump retriggers the PASS/REVISE flash. Both reflect real recorded data: when no
+// generation carries a loss yet, the gauge stays at zero (its empty state) rather
+// than inventing motion.
+func (s *store) syncLive() {
+	gens, _ := s.snapshot()
+	pts := plottable(gens)
+	if len(pts) == 0 {
+		return
+	}
+	latest := pts[len(pts)-1]
+	s.latestLoss.SetAnimated(latest.TestLoss)
+	if latest.Gen != s.verdict.Get() {
+		s.verdict.SetAnimatedWith(latest.Gen, swiftui.AnimationBouncy)
+	}
+}
+
 // piStore holds the latest pi-agent snapshot behind a mutex, mirroring store:
 // the ticker writes it; the SwiftUI builder reads a snapshot; version is the
 // observable counter that drives a rebuild when the pi data fingerprint moves.
+//
+// pulse and the tool/turn float states mirror store's live flash: pulse is the
+// per-tick heartbeat; toolCalls and turns are set with an easing animation so the
+// aggregate counters tick up to their new folded totals rather than snapping.
 type piStore struct {
 	mu      sync.Mutex
 	snap    PiSnapshot
 	version *swiftui.IntState
+
+	pulse     *swiftui.BoolState  // toggled every poll tick: liveness heartbeat
+	toolCalls *swiftui.FloatState // folded tool-call total, set animated
+	turns     *swiftui.FloatState // folded user-turn total, set animated
 }
+
+// beat toggles the heartbeat on every poll tick so the live indicator animates
+// each scan, even when the underlying pi snapshot is unchanged.
+func (s *piStore) beat() { s.pulse.SetAnimated(!s.pulse.Get()) }
 
 func (s *piStore) set(snap PiSnapshot) {
 	s.mu.Lock()
@@ -108,14 +156,37 @@ func (s *piStore) get() PiSnapshot {
 	return s.snap
 }
 
+// syncLive pushes the folded tool-call and user-turn totals into their animated
+// counters so the right panel's numbers tick up to a new total rather than
+// snapping. Both are real folds across the scanned sessions; when no pi dir is
+// found the totals are zero and the counters hold at zero.
+func (s *piStore) syncLive() {
+	snap := s.get()
+	if !snap.Agg.Found {
+		return
+	}
+	s.toolCalls.SetAnimated(float64(snap.Agg.ToolCalls))
+	s.turns.SetAnimated(float64(snap.Agg.Turns))
+}
+
 func main() {
 	runsRoot := flag.String("runs", defaultRunsRoot, "runs-localtrain root to tail (run_N/gen_M/results.json)")
 	piDir := flag.String("pi-dir", "", "pi sessions dir to scan (default: ~/.pi/agent/sessions via cc; PI_CODING_AGENT_DIR honored)")
 	interval := flag.Duration("interval", 800*time.Millisecond, "poll interval")
 	flag.Parse()
 
-	st := &store{version: swiftui.NewIntState(0)}
-	pst := &piStore{version: swiftui.NewIntState(0)}
+	st := &store{
+		version:    swiftui.NewIntState(0),
+		pulse:      swiftui.NewBoolState(false),
+		latestLoss: swiftui.NewFloatState(0),
+		verdict:    swiftui.NewIntState(0),
+	}
+	pst := &piStore{
+		version:   swiftui.NewIntState(0),
+		pulse:     swiftui.NewBoolState(false),
+		toolCalls: swiftui.NewFloatState(0),
+		turns:     swiftui.NewFloatState(0),
+	}
 
 	// Initial training load: prefer the live tree, fall back to the captured series.
 	if gens, ok := poll(*runsRoot); ok {
@@ -123,10 +194,12 @@ func main() {
 	} else {
 		st.set(capturedSeries(), false)
 	}
+	st.syncLive() // seed the gauge/verdict from the initial series
 
 	// Initial pi load.
 	ctx := context.Background()
 	pst.set(pollPi(ctx, *piDir))
+	pst.syncLive()
 
 	// Background training poller: re-scan the tree and bump version only when the
 	// series actually changes, so the chart animates as a run appears/advances.
@@ -135,6 +208,7 @@ func main() {
 		tick := time.NewTicker(*interval)
 		defer tick.Stop()
 		for range tick.C {
+			st.beat() // heartbeat on every scan, data-changed or not
 			gens, ok := poll(*runsRoot)
 			live := true
 			if !ok {
@@ -146,6 +220,7 @@ func main() {
 			}
 			last = fp
 			st.set(gens, live)
+			st.syncLive() // animate the gauge/headline and reflash the verdict
 			st.version.Set(st.version.Get() + 1)
 		}
 	}()
@@ -158,6 +233,7 @@ func main() {
 		tick := time.NewTicker(*interval)
 		defer tick.Stop()
 		for range tick.C {
+			pst.beat() // heartbeat on every scan, data-changed or not
 			snap := pollPi(ctx, *piDir)
 			fp := piFingerprint(snap)
 			if fp == last {
@@ -165,6 +241,7 @@ func main() {
 			}
 			last = fp
 			pst.set(snap)
+			pst.syncLive() // animate the tool-call / turn counters to new totals
 			pst.version.Set(pst.version.Get() + 1)
 		}
 	}()
@@ -173,14 +250,14 @@ func main() {
 		header(st),
 		swiftui.DynamicView(st.version, func(_ int) swiftui.View {
 			gens, live := st.snapshot()
-			return body(gens, live, *runsRoot)
+			return body(st, gens, live, *runsRoot)
 		}).MaxFrame(-1, -1),
 	).MaxFrame(-1, -1)
 
 	right := swiftui.VStackSpaced(14,
 		piHeader(pst),
 		swiftui.DynamicView(pst.version, func(_ int) swiftui.View {
-			return piBody(pst.get())
+			return piBody(pst, pst.get())
 		}).MaxFrame(-1, -1),
 	).MaxFrame(-1, -1)
 
@@ -202,10 +279,9 @@ func header(st *store) swiftui.View {
 	return swiftui.DynamicView(st.version, func(_ int) swiftui.View {
 		gens, live := st.snapshot()
 		src := "captured P6 series (no live run tree)"
-		dot := amber
+		dot, tag := amber, "STATIC"
 		if live {
-			src = "live: tailing run tree"
-			dot = green
+			src, dot, tag = "tailing run tree", green, "LIVE"
 		}
 		best := "-"
 		if g, l, ok := overallBest(gens); ok {
@@ -217,8 +293,7 @@ func header(st *store) swiftui.View {
 					Font(swiftui.FontTitle2).
 					FontWeight(swiftui.WeightBold),
 				swiftui.Spacer(),
-				swiftui.Image("circle.fill").ForegroundStyle(rgba(dot, 1)),
-				swiftui.Text(src).Font(swiftui.FontCaption).ForegroundStyleNamed("secondary"),
+				heartbeat(st.pulse, dot, tag, src),
 			),
 			swiftui.HStack(
 				swiftui.Text("Held-out cross-entropy per generation. Lower is better — a rising line means the model is overfitting and getting worse on data it never saw.").
@@ -237,8 +312,42 @@ func header(st *store) swiftui.View {
 	})
 }
 
-func body(gens []Gen, live bool, runsRoot string) swiftui.View {
+// heartbeat renders a "● LIVE" capsule whose dot pulses (size + opacity) on every
+// poll tick via the pulse BoolState. The animation is the visible proof the panel
+// is scanning live; the dot's color encodes the source and the trailing caption
+// spells the source out. tag is the headline word (LIVE / STATIC / IDLE) so the
+// pulse is never mistaken for live data that is not there.
+func heartbeat(pulse *swiftui.BoolState, dot swiftui.Color, tag, src string) swiftui.View {
+	return swiftui.HStackSpaced(8,
+		swiftui.AnimatedDynamicBoolView(pulse, swiftui.TransitionOpacity, func(on bool) swiftui.View {
+			scale, alpha := 0.72, 0.45
+			if on {
+				scale, alpha = 1.0, 1.0
+			}
+			return swiftui.Circle().
+				Fill(rgba(dot, alpha)).
+				Frame(11, 11).
+				ScaleEffect(scale).
+				Shadow(rgba(dot, alpha), 6, 0, 0).
+				AsView()
+		}),
+		swiftui.VStackSpaced(0,
+			swiftui.Text(tag).
+				Font(swiftui.FontCaption2).
+				FontWeight(swiftui.WeightHeavy).
+				ForegroundStyle(rgba(dot, 1)),
+			swiftui.Text(src).
+				Font(swiftui.FontCaption2).
+				ForegroundStyleNamed("secondary"),
+		),
+	).Padding(8).
+		BackgroundRoundedRect(rgba(dot, 0.12), 9).
+		Border(rgba(dot, 0.30), 1)
+}
+
+func body(st *store, gens []Gen, live bool, runsRoot string) swiftui.View {
 	return swiftui.VStackSpaced(14,
+		liveStrip(st, gens),
 		swiftui.GroupBox("Held-out test_loss (lower = better)",
 			chartCard(gens),
 		).MaxFrame(-1, 0),
@@ -246,6 +355,108 @@ func body(gens []Gen, live bool, runsRoot string) swiftui.View {
 			activityPanel(gens, live, runsRoot),
 		).MaxFrame(-1, -1),
 	)
+}
+
+// liveStrip is the left panel's animated banner: a sweeping gauge bound to the
+// newest test_loss and a verdict tile that flashes PASS/REVISE when the latest
+// generation changes. The gauge and number are driven by AnimatedDynamicFloatView
+// over the same FloatState the ticker eases, so they glide to a new generation;
+// the verdict tile is driven by AnimatedDynamicView over the verdict trigger with
+// a scale transition for the flash. Both show only recorded data: with no plotted
+// generation yet the strip renders an explicit waiting state.
+func liveStrip(st *store, gens []Gen) swiftui.View {
+	pts := plottable(gens)
+	if len(pts) == 0 {
+		return swiftui.HStackSpaced(10,
+			swiftui.Image("hourglass").ForegroundStyleNamed("secondary"),
+			swiftui.Text("Waiting for the first trained generation with a held-out test_loss…").
+				Font(swiftui.FontCallout).ForegroundStyleNamed("secondary"),
+			swiftui.Spacer(),
+		).Padding(12).
+			BackgroundRoundedRect(rgba(swiftui.RGB(0.10, 0.13, 0.18), 0.85), 14).
+			Border(rgba(muted, 0.18), 1)
+	}
+
+	latest := pts[len(pts)-1]
+	loMin, loMax := lossRange(pts)
+	// Pad the gauge range so the needle sits inside the dial, not pinned to an end.
+	span := loMax - loMin
+	if span < 0.05 {
+		span = 0.05
+	}
+	gMin, gMax := loMin-span*0.4, loMax+span*0.4
+
+	gauge := swiftui.AnimatedDynamicFloatView(st.latestLoss, swiftui.TransitionOpacity, func(v float64) swiftui.View {
+		return swiftui.VStackSpaced(4,
+			swiftui.FloatGauge(fmt.Sprintf("gen %d test_loss", latest.Gen), st.latestLoss, gMin, gMax),
+			swiftui.Text(fmt.Sprintf("%.4f", v)).
+				Font(swiftui.FontTitle2).
+				FontWeight(swiftui.WeightBold).
+				MonospacedDigit().
+				ForegroundStyle(rgba(verdictColor(latest), 1)),
+			swiftui.Text("held-out test_loss · lower is better").
+				Font(swiftui.FontCaption2).
+				ForegroundStyleNamed("secondary"),
+		)
+	})
+
+	flash := swiftui.AnimatedDynamicView(st.verdict, swiftui.TransitionScale, func(_ int) swiftui.View {
+		return verdictTile(latest)
+	})
+
+	return swiftui.HStackSpaced(14,
+		gauge.Padding(12).
+			MaxFrame(-1, 0).
+			BackgroundRoundedRect(rgba(swiftui.RGB(0.10, 0.13, 0.18), 0.85), 14).
+			Border(rgba(muted, 0.18), 1),
+		flash,
+	)
+}
+
+// verdictColor maps a generation's gate verdict to the house palette.
+func verdictColor(g Gen) swiftui.Color {
+	switch {
+	case g.Passed():
+		return green
+	case !g.Trained:
+		return amber
+	default:
+		return red
+	}
+}
+
+// verdictTile is the flashed PASS/REVISE card for the newest generation. It carries
+// a tinted glass fill and a bold verdict so the held-out gate's decision reads from
+// across the room; the AnimatedDynamicView wrapping it supplies the entrance flash.
+func verdictTile(g Gen) swiftui.View {
+	color := verdictColor(g)
+	icon := "xmark.octagon.fill"
+	if g.Passed() {
+		icon = "checkmark.seal.fill"
+	} else if !g.Trained {
+		icon = "exclamationmark.triangle.fill"
+	}
+	verdict := g.Verdict
+	if verdict == "" {
+		verdict = "—"
+	}
+	return swiftui.VStackSpaced(4,
+		swiftui.HStackSpaced(8,
+			swiftui.Image(icon).ForegroundStyle(rgba(color, 1)).ImageScale(swiftui.ImageScaleLarge),
+			swiftui.Text(verdict).
+				Font(swiftui.FontTitle).
+				FontWeight(swiftui.WeightHeavy).
+				ForegroundStyle(rgba(color, 1)),
+		),
+		swiftui.Text(fmt.Sprintf("gen %d · run %d", g.Gen, g.Run)).
+			Font(swiftui.FontCaption).
+			MonospacedDigit().
+			ForegroundStyleNamed("secondary"),
+	).Padding(16).
+		Frame(190, 0).
+		BackgroundRoundedRect(rgba(color, 0.16), 14).
+		Border(rgba(color, 0.45), 1.5).
+		Shadow(rgba(color, 0.5), 12, 0, 0)
 }
 
 // chartCard builds the live line chart. PASS gens are green circles, REVISE gens
@@ -271,8 +482,22 @@ func chartCard(gens []Gen) swiftui.View {
 		}
 	}
 
-	marks := make([]charts.Mark, 0, len(pts)*2+1)
-	// Connecting line across all gens that have a loss (drawn first, under points).
+	marks := make([]charts.Mark, 0, len(pts)*3+1)
+	// Translucent area fill under the curve, drawn first so the line and points sit
+	// on top. The fill gives the live chart depth without obscuring the data; it
+	// traces the same recorded losses as the line, never an invented baseline.
+	for _, g := range pts {
+		marks = append(marks,
+			charts.AreaMark(
+				charts.XInt("Generation", g.Gen),
+				charts.YFloat("test_loss", g.TestLoss),
+			).
+				ForegroundStyle(blue).
+				Interpolation(charts.InterpolationMonotone).
+				Opacity(0.16),
+		)
+	}
+	// Connecting line across all gens that have a loss (drawn over the area fill).
 	for _, g := range pts {
 		marks = append(marks,
 			charts.LineMark(
@@ -468,15 +693,14 @@ func rgba(c swiftui.Color, a float64) swiftui.Color {
 func piHeader(pst *piStore) swiftui.View {
 	return swiftui.DynamicView(pst.version, func(_ int) swiftui.View {
 		snap := pst.get()
-		src := "no pi runs found"
-		dot := amber
+		src, dot, tag := "no pi runs found", amber, "IDLE"
 		switch {
 		case snap.Error != "":
-			src, dot = "scan error", red
+			src, dot, tag = "scan error", red, "ERROR"
 		case snap.Agg.Found && snap.Agg.Sessions > 0:
-			src, dot = fmt.Sprintf("live: %d pi session(s)", snap.Agg.Sessions), green
+			src, dot, tag = fmt.Sprintf("%d pi session(s)", snap.Agg.Sessions), green, "LIVE"
 		case snap.Agg.Found:
-			src, dot = "pi dir present, no sessions", amber
+			src, dot, tag = "pi dir present, no sessions", amber, "IDLE"
 		}
 		return swiftui.VStackSpaced(6,
 			swiftui.HStack(
@@ -484,8 +708,7 @@ func piHeader(pst *piStore) swiftui.View {
 					Font(swiftui.FontTitle2).
 					FontWeight(swiftui.WeightBold),
 				swiftui.Spacer(),
-				swiftui.Image("circle.fill").ForegroundStyle(rgba(dot, 1)),
-				swiftui.Text(src).Font(swiftui.FontCaption).ForegroundStyleNamed("secondary"),
+				heartbeat(pst.pulse, dot, tag, src),
 			),
 			swiftui.HStack(
 				swiftui.Text("Real parsed pi session JSONL via github.com/tmc/cc. Every number folds actual entries; absent fields show n/a, never a zero that reads as data.").
@@ -500,10 +723,10 @@ func piHeader(pst *piStore) swiftui.View {
 	})
 }
 
-func piBody(snap PiSnapshot) swiftui.View {
+func piBody(pst *piStore, snap PiSnapshot) swiftui.View {
 	return swiftui.VStackSpaced(14,
 		swiftui.GroupBox("Aggregate (all pi sessions)",
-			piAggregateStrip(snap.Agg),
+			piAggregateStrip(pst, snap.Agg),
 		).MaxFrame(-1, 0),
 		toolBarCard(snap.Agg),
 		swiftui.GroupBox("Live activity feed (newest last)",
@@ -516,7 +739,7 @@ func piBody(snap PiSnapshot) swiftui.View {
 // tokens (flagged approximate, since pi JSONL carries only the streaming-start
 // snapshot), tool calls, and user turns. Zero is shown only when zero is the
 // true folded value (e.g. 0 tool calls); a missing pi dir shows n/a instead.
-func piAggregateStrip(a PiAgg) swiftui.View {
+func piAggregateStrip(pst *piStore, a PiAgg) swiftui.View {
 	if !a.Found {
 		return swiftui.HStackSpaced(12,
 			statCard("sessions", "n/a", muted),
@@ -539,8 +762,10 @@ func piAggregateStrip(a PiAgg) swiftui.View {
 	return swiftui.VStackSpaced(8,
 		swiftui.HStackSpaced(12,
 			statCard("sessions", commas(a.Sessions), blue),
-			statCard("user turns", commas(a.Turns), green),
-			statCard("tool calls", commas(a.ToolCalls), toolColor),
+			// user turns and tool calls ease to their new folded totals so the
+			// counters visibly tick up when fresh pi activity lands.
+			animatedStatCard("user turns", pst.turns, green),
+			animatedStatCard("tool calls", pst.toolCalls, toolColor),
 		),
 		swiftui.HStackSpaced(12,
 			statCard("input tok", commas(a.InputTokens), amber),
@@ -557,6 +782,29 @@ func statCard(label, value string, color swiftui.Color) swiftui.View {
 			FontWeight(swiftui.WeightBold).
 			MonospacedDigit().
 			ForegroundStyle(rgba(color, 1)),
+		swiftui.Text(label).
+			Font(swiftui.FontCaption2).
+			ForegroundStyleNamed("secondary"),
+	).Padding(10).
+		MaxFrame(-1, 0).
+		BackgroundRoundedRect(rgba(color, 0.12), 10).
+		Border(rgba(color, 0.30), 1)
+}
+
+// animatedStatCard is statCard's reactive sibling: the value is read from a
+// FloatState the ticker eases, so the count animates to a new folded total. The
+// number is rounded to its integer value (the underlying datum is a count); the
+// FloatState carries only real folds, so the easing never invents a count.
+func animatedStatCard(label string, state *swiftui.FloatState, color swiftui.Color) swiftui.View {
+	return swiftui.VStackSpaced(2,
+		swiftui.AnimatedDynamicFloatView(state, swiftui.TransitionOpacity, func(v float64) swiftui.View {
+			return swiftui.Text(commas(int(v + 0.5))).
+				Font(swiftui.FontTitle3).
+				FontWeight(swiftui.WeightBold).
+				MonospacedDigit().
+				ForegroundStyle(rgba(color, 1)).
+				AsView()
+		}),
 		swiftui.Text(label).
 			Font(swiftui.FontCaption2).
 			ForegroundStyleNamed("secondary"),
