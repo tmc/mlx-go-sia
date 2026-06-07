@@ -278,8 +278,11 @@ func main() {
 func header(st *store) swiftui.View {
 	return swiftui.DynamicView(st.version, func(_ int) swiftui.View {
 		gens, live := st.snapshot()
-		src := "captured P6 series (no live run tree)"
-		dot, tag := amber, "STATIC"
+		// Captured fallback is a hardcoded recorded snapshot, NOT a live
+		// measurement — flag it unmistakably (red, "NOT LIVE") so the numbers on
+		// screen can never be mistaken for a fresh run.
+		src := "⚠ hardcoded snapshot — point -runs at a run tree"
+		dot, tag := red, "CAPTURED · NOT LIVE"
 		if live {
 			src, dot, tag = "tailing run tree", green, "LIVE"
 		}
