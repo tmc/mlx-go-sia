@@ -32,9 +32,9 @@ import (
 	"fmt"
 	"log"
 
-	sia "github.com/tmc/mlx-go-sia"
 	"github.com/tmc/mlx-go-lm/mlxlm"
 	"github.com/tmc/mlx-go-lm/mlxlm/llm/models"
+	sia "github.com/tmc/mlx-go-sia"
 	rl "github.com/tmc/mlx-go/examples/mlx-go-rl"
 	rlsd "github.com/tmc/mlx-go/examples/mlx-go-rlsd"
 	"github.com/tmc/mlx-go/mlx"
@@ -231,13 +231,15 @@ func (e *RLSDTrainExecutor) RunTarget(ctx context.Context, req sia.TargetRequest
 
 // Stubs so the file is parseable (not compiled due to //go:build ignore):
 
-type rlTokenizer struct{ tok interface{ Encode(string) ([]int32, error) } }
+type rlTokenizer struct {
+	tok interface{ Encode(string) ([]int32, error) }
+}
 
 func (r *rlTokenizer) Encode(s string) ([]int32, error) { return r.tok.Encode(s) }
 
-func parseRLSDSpec(_ string) (RLSDSpec, error)                                              { return RLSDSpec{}, nil }
-func createLoRAAdapters(_ models.LanguageModel, _ int) (interface{ Free() }, error)         { return nil, nil }
-func loadGSM8KExamples(_ string) ([]interface{}, error)                                     { return nil, nil }
+func parseRLSDSpec(_ string) (RLSDSpec, error)                                      { return RLSDSpec{}, nil }
+func createLoRAAdapters(_ models.LanguageModel, _ int) (interface{ Free() }, error) { return nil, nil }
+func loadGSM8KExamples(_ string) ([]interface{}, error)                             { return nil, nil }
 func newGSM8KVerifier(_ interface{}, _ []interface{}) (rl.Environment, func(string, string) ([]int32, error), error) {
 	return nil, nil, nil
 }
