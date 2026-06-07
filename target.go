@@ -55,6 +55,12 @@ type ExecTargetExecutor struct {
 	InterpreterArgs []string
 	// Env is extra environment appended to os.Environ (e.g. SANDBOX_URL).
 	Env []string
+	// Progress, when non-nil, also receives the agent's combined output as it is
+	// produced, so a long-running generation can be watched live. The default
+	// (nil) keeps the executor quiet — output still goes to StdoutLog and the
+	// returned TargetResult — so tests and library callers are unaffected. CLIs
+	// set this to os.Stdout.
+	Progress io.Writer
 }
 
 // RunTarget runs the target agent with the fixed --dataset_dir/--working_dir
@@ -75,7 +81,7 @@ func (e *ExecTargetExecutor) RunTarget(ctx context.Context, req TargetRequest) (
 	defer logFile.Close()
 
 	var buf bytes.Buffer
-	out := io.MultiWriter(logFile, &buf)
+	out := teeProgress(logFile, &buf, e.Progress)
 
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = req.WorkingDir

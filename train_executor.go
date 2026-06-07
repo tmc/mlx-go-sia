@@ -53,6 +53,12 @@ type MLXTrainExecutor struct {
 	Defaults TrainSpec
 	// Env is extra environment appended to os.Environ for the training process.
 	Env []string
+	// Progress, when non-nil, also receives mlx-lm-train's combined output as it
+	// is produced, so a long-running fine-tune can be watched live. The default
+	// (nil) keeps the executor quiet — output still goes to StdoutLog and the
+	// returned TargetResult — so tests and library callers are unaffected. CLIs
+	// set this to os.Stdout.
+	Progress io.Writer
 }
 
 // NewMLXTrainExecutor returns an executor that fine-tunes baseModel on the
@@ -114,7 +120,7 @@ func (e *MLXTrainExecutor) RunTarget(ctx context.Context, req TargetRequest) (Ta
 	defer logFile.Close()
 
 	var buf bytes.Buffer
-	out := io.MultiWriter(logFile, &buf)
+	out := teeProgress(logFile, &buf, e.Progress)
 
 	bin := e.TrainBin
 	if bin == "" {

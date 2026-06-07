@@ -123,7 +123,7 @@ func run(argv []string) error {
 			// environment already; this mirrors it onto OPENAI_API_KEY.
 			Env: providerEnv(metaProfile.Provider),
 		}
-		target = &sia.ExecTargetExecutor{Interpreter: *interpreter, InterpreterArgs: []string{"-u"}}
+		target = &sia.ExecTargetExecutor{Interpreter: *interpreter, InterpreterArgs: []string{"-u"}, Progress: os.Stdout}
 	}
 
 	var eval sia.Evaluator = sia.NopEvaluator{}

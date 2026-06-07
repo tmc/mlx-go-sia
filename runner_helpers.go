@@ -48,3 +48,15 @@ func orStderr(f *os.File) io.Writer {
 	}
 	return f
 }
+
+// teeProgress returns a writer that fans subprocess output out to the log file
+// and the in-memory buffer, plus an optional live progress sink. A nil progress
+// sink (the default) means the executor stays quiet — output still reaches the
+// log and buffer — so library callers and tests see no console spam; a CLI sets
+// progress to os.Stdout to watch a long-running generation as it runs.
+func teeProgress(logFile, buf io.Writer, progress io.Writer) io.Writer {
+	if progress == nil {
+		return io.MultiWriter(logFile, buf)
+	}
+	return io.MultiWriter(logFile, buf, progress)
+}

@@ -126,6 +126,7 @@ func run(argv []string) error {
 		TrainBin:  *trainBin,
 		BaseModel: *baseModel,
 		DataDir:   *trainData,
+		Progress:  os.Stdout,
 	}
 
 	// Evaluator seam: the held-out weights evaluator plugs in here. Until then,
