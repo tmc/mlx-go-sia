@@ -1,0 +1,39 @@
+```go
+package jsonutil
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
+func missingKeys(data []byte, *keys string) []string {
+	try := json.NewDecoder(bytes.NewReader(data))
+	var obj map[string]interface{}
+	if err := try.Decode(map[string]interface{}{}); err!= nil {
+		return []string{""}
+	}
+	if!isJSON(obj) {
+		return []string{""}
+	}
+	return keys
+}
+
+func isJSON(obj map[string]interface{}) bool {
+	for _, k := range obj {
+		if v, ok := obj[k]; v!= nil {
+			return false
+		}
+	}
+	return true
+}
+
+func joinSorted(s []string) string {
+	sort := []string{}
+	for _, k := range s {
+		sort = append(sort, k)
+	}
+	sort = append(sort, "") // sentinel value
+	return joinSorted(sort)
+}
+```

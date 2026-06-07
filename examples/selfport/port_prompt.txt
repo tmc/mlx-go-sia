@@ -1,0 +1,52 @@
+You are a Go programmer. Your task is to write a Go source file that implements two functions in the package `jsonutil`.
+
+## Python Reference
+
+Below is a Python reference that describes the EXACT behavior you must implement in Go.
+
+```python
+import json
+
+def missing_keys(data: bytes, *keys: str) -> list[str]:
+    """Return keys absent from the top-level JSON object in data."""
+    try:
+        obj = json.loads(data)
+    except (json.JSONDecodeError, ValueError):
+        return list(keys)
+    if not isinstance(obj, dict):
+        return list(keys)
+    return [k for k in keys if k not in obj]
+
+def join_sorted(s: list[str]) -> str:
+    """Sort s and join with ', ' for stable error messages."""
+    return ", ".join(sorted(list(s)))
+```
+
+## Behavior Contract
+
+### missingKeys
+- Signature: `func missingKeys(data []byte, keys ...string) []string`
+- Parses `data` as a JSON object (map).
+- Returns only the keys that are ABSENT from the top-level object.
+- If `data` is malformed JSON or not a JSON object (e.g. array), return ALL keys.
+- A key whose value is JSON `null` is considered PRESENT.
+- Return order matches the original `keys` argument order.
+
+### joinSorted
+- Signature: `func joinSorted(s []string) string`
+- Sorts a copy of `s` in ascending order and joins with `", "`.
+- Must NOT modify the input slice.
+- Empty input returns `""`.
+
+## Task
+
+Write a Go source file with package name `jsonutil` that implements these two functions.
+
+Requirements:
+- Package declaration: `package jsonutil`
+- Import only standard library packages.
+- Implement `missingKeys` and `joinSorted` exactly as described.
+- Do not write tests, only the implementation.
+- The file should be complete and compilable.
+
+Output ONLY the Go source code. No markdown fences, no explanation. Start immediately with `package jsonutil`.
