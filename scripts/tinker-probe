@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# tinker-probe — a thin, task-agnostic OpenAI-compatible probe for sampling a
+# hosted model through the SIA engine seam. It is the sponsor-side counterpart to
+# scripts/pi-mlx (local) and scripts/nebius-agent (cloud, inferopt-specific): same
+# request shape, but generic so it can compare a TRAINED Tinker LoRA checkpoint
+# against its base model on identical prompts.
+#
+# It POSTs one chat completion and prints, to stdout, a single JSON line with the
+# model id, the prompt, the completion text, token usage, latency, and the
+# endpoint host. The API key is read from the environment and NEVER written to the
+# output (the tinker:// model URI is not secret and IS shown; the tml- key is not).
+#
+# Environment:
+#   TINKER_API_KEY   required bearer token (env only; source /tmp/nebius-env.sh)
+#   TINKER_BASE_URL  OpenAI-compatible base (default: hosted Tinker prod)
+#   PROBE_MAXTOK     max generated tokens (default 16 — these are short answers)
+#   PROBE_TEMP       sampling temperature (default 0 — deterministic)
+#
+# Usage:
+#   source /tmp/nebius-env.sh
+#   scripts/tinker-probe <model-id> <prompt>
+#   scripts/tinker-probe 'tinker://...parity-...-sampler' 'Parity of 1011?'
+set -euo pipefail
+
+: "${TINKER_API_KEY:?TINKER_API_KEY not set (source /tmp/nebius-env.sh)}"
+base="${TINKER_BASE_URL:-https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1}"
+base="${base%/}"
+
+if [ "$#" -lt 2 ]; then
+	echo "usage: tinker-probe <model-id> <prompt>" >&2
+	exit 2
+fi
+model="$1"
+prompt="$2"
+maxtok="${PROBE_MAXTOK:-16}"
+temp="${PROBE_TEMP:-0}"
+endpoint="$base/chat/completions"
+host="${base#https://}"; host="${host%%/*}"
+
+body="$(
+	jq -n \
+		--arg model "$model" \
+		--arg user "$prompt" \
+		--argjson maxtok "$maxtok" \
+		--argjson temp "$temp" \
+		'{
+			model: $model,
+			messages: [{role: "user", content: $user}],
+			max_tokens: $maxtok,
+			temperature: $temp
+		}'
+)"
+
+start_ns="$(date +%s%N)"
+resp="$(
+	curl -sS --fail-with-body \
+		-X POST "$endpoint" \
+		-H "Authorization: Bearer $TINKER_API_KEY" \
+		-H "Content-Type: application/json" \
+		-d "$body"
+)" || { echo "tinker-probe: request to $host failed: $resp" >&2; exit 3; }
+end_ns="$(date +%s%N)"
+latency_ms=$(( (end_ns - start_ns) / 1000000 ))
+
+# Emit one scrubbed JSON line: model URI (shown), prompt, completion, usage,
+# latency, host. The key never appears.
+printf '%s' "$resp" | jq -c \
+	--arg model "$model" \
+	--arg prompt "$prompt" \
+	--arg host "$host" \
+	--argjson latency_ms "$latency_ms" \
+	'{
+		provider: "tinker-hosted",
+		endpoint_host: $host,
+		model: $model,
+		prompt: $prompt,
+		completion: (.choices[0].message.content // ""),
+		finish_reason: (.choices[0].finish_reason // null),
+		usage: (.usage // {}),
+		latency_ms: $latency_ms
+	}'

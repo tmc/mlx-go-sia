@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# pi-capture — honest per-gen capture for a pi-driven inferopt run.
+#
+# For each gen_N it prints: candidate.go md5, a literal WHIFF/REAL-EDIT label
+# derived from md5 == the frozen baseline, the oracle verdict/correct/speedup,
+# and the wrapper's pi_meta.json route. THE RULE (the trap that burned the first
+# Nebius read): a gen whose candidate.go md5 equals the baseline is a WHIFF — the
+# seed scoring itself — even if the oracle marks it PASS. Only an md5-DISTINCT
+# candidate the oracle grades (PASS or REVISE) is a real pi-authored gen.
+#
+# Usage:  scripts/pi-capture <run-root>   # e.g. /tmp/pi-local   (defaults to it)
+set -euo pipefail
+
+root="${1:-/tmp/pi-local}"
+baseline_file="$root/_oracle/run_1/baseline_candidate.go"
+md5of() { md5 -q "$1" 2>/dev/null || md5sum "$1" | awk '{print $1}'; }
+
+baseline="29d9237c320e7e5dc3193072136cd11f"
+[[ -f "$baseline_file" ]] && baseline="$(md5of "$baseline_file")"
+
+echo "== pi -> MLX/cloud, honest per-gen capture =="
+echo "run root:      $root"
+echo "baseline md5:  $baseline   (a gen at this md5 = WHIFF, the seed scoring itself, NOT a pi win)"
+echo
+
+printf '%-5s %-34s %-12s %-8s %-9s %-8s %s\n' gen md5 edit verdict correct speedup route
+real=0 whiff=0
+for d in "$root"/run_1/gen_*/; do
+	[[ -d "$d" ]] || continue
+	g="$(basename "$d" | sed 's/gen_//')"
+	cg="$d/candidate.go"; rj="$d/results.json"; pm="$d/pi_meta.json"
+
+	md5="(none)"; edit="NO-FILE"
+	if [[ -f "$cg" ]]; then
+		md5="$(md5of "$cg")"
+		if [[ "$md5" == "$baseline" ]]; then edit="WHIFF"; whiff=$((whiff+1)); else edit="REAL-EDIT"; real=$((real+1)); fi
+	fi
+
+	verdict="-"; correct="-"; speedup="-"
+	if [[ -f "$rj" ]]; then
+		read -r verdict correct speedup < <(python3 -c "
+import json
+d=json.load(open('$rj'))
+print(d.get('verdict','-'), d.get('correctness_ok','-'), round(d.get('speedup',0),4) if d.get('speedup') is not None else '-')
+" 2>/dev/null || echo "- - -")
+	fi
+	route="-"; [[ -f "$pm" ]] && route="$(python3 -c "import json;print(json.load(open('$pm')).get('route','-'))" 2>/dev/null || echo -)"
+
+	# A baseline-md5 gen is a whiff regardless of the oracle verdict; mark it loudly.
+	flag=""; [[ "$edit" == "WHIFF" && "$verdict" == "PASS" ]] && flag="  <- PASS-on-baseline = WHIFF (seed scored itself), NOT a pi win"
+	printf '%-5s %-34s %-12s %-8s %-9s %-8s %s%s\n' "$g" "$md5" "$edit" "$verdict" "$correct" "$speedup" "$route" "$flag"
+done
+
+echo
+echo "summary: $real real md5-distinct pi gen(s), $whiff whiff(s) at baseline."
+if [[ "$real" -eq 0 ]]; then
+	echo "HONEST RESULT: no local pi-authored candidate displaced the baseline — local capability/latency floor, the gate held the baseline. (Same anti-Goodhart shape as the Nebius null.)"
+else
+	echo "REAL LOCAL BEAT: $real generation(s) where the local pi agent authored a distinct candidate the oracle graded."
+fi

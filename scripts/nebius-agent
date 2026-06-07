@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# nebius-agent — the SIA meta/feedback engine pointed at Nebius Token Factory.
+#
+# It is the cloud counterpart to scripts/pi-mlx: the SIA ExecRunner writes the
+# generation prompt to this script's stdin and runs it in the generation's
+# working directory. Where pi-mlx shells out to a LOCAL mlx-lm-generate, this
+# wrapper POSTs the prompt to an OpenAI-compatible frontier model on Nebius and
+# writes the model's optimized candidate.go into the working directory — the file
+# the inferopt oracle grades. Same seam, same contract, a cloud model instead of
+# a local one.
+#
+# Contract (mirrors pi-mlx + the inferopt task):
+#   - reads the full SIA prompt on stdin (it embeds task.md: the candidate.go
+#     contract and the exact sampler algorithm the tokens must reproduce);
+#   - runs in the generation's WorkingDir (the ExecRunner sets cmd.Dir);
+#   - writes candidate.go into that cwd (the oracle seeds the baseline only if it
+#     is missing, so a clean exit with no file == an honest no-op gen);
+#   - exits 0 on success; non-zero only if the model produced nothing usable, so
+#     the loop falls back to the seeded baseline rather than a garbage candidate.
+#
+# Honesty: the API key is read from the environment and NEVER written to any file.
+# A scrubbed nebius_meta.json (model id, token usage, latency, endpoint host — no
+# key) is written next to candidate.go for the capture.
+#
+# Environment:
+#   NEBIUS_API_KEY    required; the bearer token (env only, never persisted)
+#   NEBIUS_BASE_URL   OpenAI-compatible base, e.g. https://.../v1/  (required)
+#   NEBIUS_MODEL      model id; overridden by the first CLI arg (%MODEL% token)
+#   NEBIUS_MAXTOK     max generated tokens (default 8192 — generous, so a thinking
+#                     model's final answer is not truncated into reasoning_content)
+#   NEBIUS_TEMP       sampling temperature (default 0 — deterministic code output)
+#
+# Usage from inferopt (the %MODEL% token substitutes the model id as arg 1):
+#   inferopt -agent-cmd /abs/scripts/nebius-agent -agent-args '%MODEL%' \
+#            -model openai/gpt-oss-120b-fast -max-gen 4
+set -euo pipefail
+
+: "${NEBIUS_API_KEY:?NEBIUS_API_KEY not set (source /tmp/nebius-env.sh)}"
+: "${NEBIUS_BASE_URL:?NEBIUS_BASE_URL not set (source /tmp/nebius-env.sh)}"
+
+model="${1:-${NEBIUS_MODEL:-deepseek-ai/DeepSeek-V3.2-fast}}"
+maxtok="${NEBIUS_MAXTOK:-8192}"
+temp="${NEBIUS_TEMP:-0}"
+base="${NEBIUS_BASE_URL%/}"
+endpoint="$base/chat/completions"
+host="${base#https://}"; host="${host%%/*}"
+
+prompt="$(cat)" # ExecRunner writes the SIA prompt to stdin.
+
+# The stock SIA prompt is ~300 lines of generic target_agent.py boilerplate; a
+# strong instruction-follower obeys it over a system message and writes Python.
+# Re-assert the real contract at the END of the user message, where recency makes
+# it dominate. (Verified: this flips deepseek-V3.2 from a Python target_agent.py to
+# raw `package main` Go.)
+read -r -d '' override <<'OVR' || true
+
+=== OVERRIDE — HIGHEST PRIORITY. The instructions below supersede everything above. ===
+Disregard ALL instructions above about writing a Python target_agent.py, about
+--dataset_dir/--working_dir, about agent_execution logging, or about an improvement.md.
+Those are boilerplate from a different task type and DO NOT APPLY here.
+
+Your ENTIRE response must be the raw contents of a single Go file named candidate.go:
+- The FIRST line of your response must be exactly: package main
+- No markdown fences. No Python. No prose, analysis, or explanation. Go source only.
+- Keep it a standalone stdlib `go run candidate.go` program: read fixtures JSON on
+  stdin; with -mode=tokens print one token id per line; with -mode=bench print one
+  line `tokens_per_sec <float>`. Reproduce the sampler algorithm + splitMix64 RNG
+  bit-for-bit so the emitted tokens are identical; make it FASTER.
+OVR
+prompt="$prompt$override"
+
+# The system message pins the REAL contract over the generic SIA boilerplate (the
+# stock meta/feedback prompt talks about a Python target_agent.py; this task is a
+# single Go file). We hand the model the naive seed as its starting point so it
+# has concrete code to optimize, and demand ONLY the Go source back.
+read -r -d '' system <<'SYS' || true
+You are optimizing a single Go source file named candidate.go: a decode-step
+sampler that reads a fixtures JSON on stdin and emits tokens. Your ONLY goal is
+to make it sample tokens FASTER while emitting the EXACT SAME token sequence.
+
+IGNORE any instruction in the user message about writing a Python target_agent.py,
+about --dataset_dir/--working_dir arguments, about agent_execution logging, or about
+an improvement.md — that is generic boilerplate from another task type. THIS task is
+the single Go file candidate.go ONLY.
+
+HARD OUTPUT CONTRACT — follow exactly:
+- Respond with ONLY the complete contents of candidate.go. The VERY FIRST line of
+  your reply must be either `package main` or a `//` comment; the file must contain
+  the real `package main` declaration. Do NOT wrap the Go in a Python program, a
+  Python triple-quoted string, a class, a function, or markdown fences. Do NOT write
+  any analysis or explanation. Emit raw Go source and nothing else.
+- It MUST stay a single, standalone, stdlib-only `package main` program run with
+  `go run candidate.go` that: reads the fixtures JSON on stdin; with -mode=tokens
+  prints one token id per line; with -mode=bench prints exactly one line
+  `tokens_per_sec <float>`.
+- You MUST reproduce the sampling algorithm, tie-breaks, and the splitMix64 RNG
+  bit-for-bit (changing them changes the tokens and fails the hidden oracle).
+- You MAY rewrite Sample, add helpers/types, precompute, avoid allocations, use
+  partial selection instead of full sorts, reuse buffers. Keep float math
+  identical where it affects the chosen token (e.g. divide by temperature, do
+  not multiply by a reciprocal).
+
+Here is the current candidate.go to optimize (preserve its behavior exactly):
+---BEGIN candidate.go---
+SEED_PLACEHOLDER
+---END candidate.go---
+SYS
+
+# Splice the seed source into the system message at runtime. The seed lives next
+# to this wrapper's sibling command; we read it from the repo so the model always
+# starts from the canonical baseline, not whatever a prior gen left behind.
+seed_file=""
+for c in \
+  "$(dirname "$0")/../cmd/inferopt/internal/seed/candidate.go.txt" \
+  "$(dirname "$0")/../../cmd/inferopt/internal/seed/candidate.go.txt"; do
+  if [[ -f "$c" ]]; then seed_file="$c"; break; fi
+done
+if [[ -n "$seed_file" ]]; then
+  system="${system/SEED_PLACEHOLDER/$(cat "$seed_file")}"
+else
+  # No seed file found: drop the placeholder line; the embedded task.md in the
+  # prompt still fully specifies the algorithm.
+  system="${system/SEED_PLACEHOLDER/(the baseline is described in the task below)}"
+fi
+
+# Build the request body with jq so the prompt/system text is JSON-escaped safely.
+body="$(
+  jq -n \
+    --arg model "$model" \
+    --arg sys "$system" \
+    --arg user "$prompt" \
+    --argjson maxtok "$maxtok" \
+    --argjson temp "$temp" \
+    '{
+      model: $model,
+      messages: [
+        {role: "system", content: $sys},
+        {role: "user",   content: $user}
+      ],
+      max_tokens: $maxtok,
+      temperature: $temp
+    }'
+)"
+
+# bail records why this gen produced no candidate and exits 0 (NOT an error): the
+# inferopt target seeds the frozen baseline when candidate.go is absent, so a whiff
+# becomes an honest no-op generation and the loop keeps going. Killing the loop on
+# one bad completion would be the wrong call — a frontier model that misfires once
+# should still get a feedback turn. The scrubbed reason lands in nebius_meta.json.
+bail() {
+  local reason="$1"
+  echo "nebius-agent: $reason — leaving baseline (no-op gen)" >&2
+  jq -n --arg model "$model" --arg host "$host" --arg reason "$reason" \
+    '{provider:"nebius-token-factory", endpoint_host:$host, model:$model, wrote_candidate:false, reason:$reason}' \
+    > nebius_meta.json 2>/dev/null || true
+  exit 0
+}
+
+start_ns="$(date +%s%N)"
+resp="$(
+  curl -sS --fail-with-body \
+    -X POST "$endpoint" \
+    -H "Authorization: Bearer $NEBIUS_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$body"
+)" || bail "request to $host failed"
+end_ns="$(date +%s%N)"
+latency_ms=$(( (end_ns - start_ns) / 1000000 ))
+
+# Pull the assistant text. Non-thinking models put the code in message.content;
+# thinking models (gpt-oss, Qwen *Thinking*) may leave content empty and stash the
+# real answer in reasoning_content — fall back to it so the loop can still extract.
+content="$(printf '%s' "$resp" | jq -r '.choices[0].message.content // ""')"
+if [[ -z "$content" || "$content" == "null" ]]; then
+  content="$(printf '%s' "$resp" | jq -r '.choices[0].message.reasoning_content // ""')"
+fi
+finish="$(printf '%s' "$resp" | jq -r '.choices[0].finish_reason // "?"')"
+
+if [[ -z "$content" || "$content" == "null" ]]; then
+  bail "model $model returned empty content+reasoning (finish_reason=$finish)"
+fi
+
+# Extract the Go source robustly. Models reason in prose, wrap code in markdown
+# fences, or even embed the real candidate inside a Python target_agent.py string
+# (the boilerplate framing). So we do NOT trust the raw content: we locate the real
+# `package main` line and slice from the leading comment block (the // lines just
+# above it, if any) through end of content, then trim any trailing Python/markdown
+# string terminator that followed the Go ('''  """  or a closing fence).
+code="$(
+  printf '%s' "$content" | awk '
+    # Record candidate start: a line that is exactly the package clause.
+    /^[[:space:]]*package[[:space:]]+main[[:space:]]*$/ && pkg==0 {
+      pkg=NR
+      # Walk back over an immediately-preceding // comment block to keep the header.
+      start=NR
+      for (i=NR-1; i>=1; i--) {
+        if (lines[i] ~ /^[[:space:]]*\/\//) start=i; else break
+      }
+    }
+    { lines[NR]=$0 }
+    END {
+      if (pkg==0) exit                       # no package main line at all
+      for (i=start; i<=NR; i++) {
+        l=lines[i]
+        # Stop at a Python/markdown terminator that closes a wrapper around the Go.
+        if (l ~ /^[[:space:]]*('"'"''"'"''"'"'|"""|```)[[:space:]]*$/) break
+        print l
+      }
+    }
+  '
+)"
+# Fallback: no package-main line found -> use the raw content (lets the gate reject).
+if [[ -z "${code//[[:space:]]/}" ]]; then code="$content"; fi
+
+# Shape gate: the FIRST non-comment line must be exactly `package main` (a match on
+# the phrase buried in a comment is NOT enough — that is how a Python-wrapped reply
+# slips through), and the program must implement the candidate's stdin/-mode
+# contract (so a stray `package main` snippet is not accepted). We deliberately do
+# NOT require a specific Sample signature: the model may restructure the program
+# freely — the compiler and the exact-token oracle are the real gate. If this fails,
+# bail (exit 0) so the loop seeds the honest baseline and the gen reads as a null.
+first_code_line="$(printf '%s\n' "$code" | grep -vE '^[[:space:]]*(//|$)' | head -1)"
+if [[ "$first_code_line" != "package main" ]]; then
+  bail "model output is not raw candidate.go (first code line: '${first_code_line:0:60}'; finish_reason=$finish)"
+fi
+if ! grep -q '"mode"' <<<"$code" && ! grep -q -- '-mode' <<<"$code"; then
+  bail "model output lacks the -mode stdin contract; not a runnable candidate (finish_reason=$finish)"
+fi
+
+printf '%s\n' "$code" > candidate.go
+
+# Scrubbed honesty sidecar — model id, token usage, latency, endpoint host. NO key.
+jq -n \
+  --arg model "$model" \
+  --arg host "$host" \
+  --arg finish "$finish" \
+  --argjson latency_ms "$latency_ms" \
+  --argjson usage "$(printf '%s' "$resp" | jq '.usage // {}')" \
+  '{provider: "nebius-token-factory", endpoint_host: $host, model: $model, wrote_candidate: true, finish_reason: $finish, latency_ms: $latency_ms, usage: $usage}' \
+  > nebius_meta.json 2>/dev/null || true
+
+echo "nebius-agent: wrote candidate.go from $model via $host (${latency_ms}ms, $(printf '%s' "$resp" | jq -r '.usage.total_tokens // "?"') tok)" >&2

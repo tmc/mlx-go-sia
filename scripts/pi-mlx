@@ -1,34 +1,190 @@
 #!/usr/bin/env bash
-# pi-mlx — the SIA offline meta/feedback engine: read a prompt on stdin and
-# generate a completion locally with mlx-lm-generate, writing it to stdout.
+# pi-mlx — the SIA meta/feedback engine: drive the REAL pi coding agent against
+# an OpenAI-compatible model server (local MLX via mlx_lm.server, or a cloud
+# provider like Nebius Token Factory), so the agent itself rewrites candidate.go.
 #
-# This is the whole of the "fully offline" path (spec docs/specs/02-pi.md): the
-# SIA ExecRunner writes the prompt to this script's stdin and runs it in the
-# generation's working directory; the script shells out to mlx-lm-generate so
-# the loop runs with no network and no in-process model dependency.
+# This replaces the old one-shot mlx-lm-generate path (the user's requirement:
+# "pi-mlx should use mlx-lm-SERVE, not generate", driven by the real pi agent).
+# The SIA ExecRunner writes the task prompt to this script's stdin and runs it in
+# the generation's WorkingDir; the script ends with an improved candidate.go in
+# that directory (cwd) and exits 0 on success — the exact contract inferopt's
+# PiRunner/ExecRunner already calls, unchanged.
 #
-# Default model: mlx-community/Llama-3.2-1B-Instruct-4bit — a 4-bit Llama that
-# loads in ~0.3s and is already cached, fast enough to keep the loop watchable.
-# (The cached Qwen2.5 family does NOT load in this mlx-lm-generate build:
-# "unknown model family qwen2"; the llama family is registered.) Override with
-# PI_MLX_MODEL for a smarter run, e.g. mlx-community/Llama-3.2-3B-Instruct-4bit
-# — but that model is not pre-cached and auto-downloads (~1.7 GiB) on first use,
-# so keep the default for a network-free demo.
+# Backend is provider-parameterized via env so one wrapper serves both the local
+# MLX server and a cloud provider (Agent4 drives Nebius through the same script):
+#   PI_PROVIDER  pi provider name in ~/.pi/agent/models.json (default: mlx-coder, local :8082)
+#   PI_MODEL     model id                                    (default: Qwen2.5-Coder-1.5B-Instruct-4bit)
+#   PI_API_KEY   api key, passed as `pi --api-key` at runtime; keep cloud keys env-only, never in models.json
+#   PI_BIN       path to the pi CLI                          (default: the nvm install)
+#   PI_MAXTOK    soft cap hint appended to the prompt        (default: unset; cloud reasoning models want >=4096)
+#   PI_TIMEOUT   seconds before the pi call is killed        (default: 240)
+#   PI_TOOLS     pi --tools list                             (default: read,bash,edit,write)
+#   PI_DEBUG     if set, keep the raw pi transcript at ./pi-mlx-transcript.txt
 #
-# Environment:
-#   PI_MLX_MODEL    model id or path        (default mlx-community/Llama-3.2-1B-Instruct-4bit)
-#   PI_MLX_MAXTOK   max generated tokens    (default 2048)
-#   PI_MLX_TEMP     sampling temperature    (unset → mlx-lm-generate default)
-# Extra args after `--` are passed through to mlx-lm-generate verbatim.
+# Why route (b) extraction: small local code models (1.5B/3B) do NOT fire pi's
+# native write tool — they emit a JSON {"name":"write","arguments":{"content":...}}
+# blob (or a ```go fence) as plain text. So we run pi with tools enabled (a capable
+# model may write candidate.go directly), and if no improved candidate.go results,
+# we deterministically extract the Go program from pi's transcript and write it.
+# Either way the loop is the REAL pi agent talking to mlx-lm-serve / the cloud.
 set -euo pipefail
 
-model="${PI_MLX_MODEL:-mlx-community/Llama-3.2-1B-Instruct-4bit}"
-maxtok="${PI_MLX_MAXTOK:-2048}"
-prompt="$(cat)" # ExecRunner writes the SIA prompt to stdin.
+provider="${PI_PROVIDER:-mlx-coder}"
+# PI_MODEL is the new knob; PI_MLX_MODEL is the legacy var PiRunner exports, honored
+# as a fallback so the inferopt -engine pi contract works without code changes.
+model="${PI_MODEL:-${PI_MLX_MODEL:-mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit}}"
+pi_bin="${PI_BIN:-/Users/tmc/.nvm/versions/node/v20.19.6/bin/pi}"
+tools="${PI_TOOLS:-read,bash,edit,write}"
+timeout_s="${PI_TIMEOUT:-240}"
 
-args=(-model "$model" -max-tokens "$maxtok" -q -prompt "$prompt")
-if [[ -n "${PI_MLX_TEMP:-}" ]]; then
-	args+=(-temp "$PI_MLX_TEMP")
+prompt="$(cat)" # ExecRunner writes the SIA task prompt to stdin.
+
+# Steer the agent to produce the file, regardless of whether its tool calls fire:
+# ask it to WRITE candidate.go AND to also print the full file in one ```go fence,
+# so route (b) extraction always has something to recover.
+read -r -d '' steer <<'STEER' || true
+
+OUTPUT CONTRACT (critical): Improve ./candidate.go in the current directory.
+Use the write tool to overwrite candidate.go with the complete, improved program.
+ALSO print the entire final candidate.go exactly once, fenced as a go code block,
+with no commentary inside the fence. It must remain a single standalone stdlib-only
+package main that compiles with `go run candidate.go` and preserves token output.
+STEER
+
+full_prompt="${prompt}
+${steer}"
+if [[ -n "${PI_MAXTOK:-}" ]]; then
+	full_prompt="${full_prompt}
+Keep the file under roughly ${PI_MAXTOK} tokens."
 fi
 
-exec mlx-lm-generate "${args[@]}" "$@"
+# Portable md5: BSD `md5 -q` (macOS) or coreutils `md5sum`.
+md5of() { md5 -q "$1" 2>/dev/null || md5sum "$1" | awk '{print $1}'; }
+
+# Snapshot the seed candidate so we can tell if the agent really changed it.
+before=""
+[[ -f candidate.go ]] && before="$(md5of candidate.go)"
+
+# Assemble pi args. --no-session keeps runs ephemeral; -p is non-interactive.
+pi_args=(--provider "$provider" --model "$model" --no-session --tools "$tools" -p)
+if [[ -n "${PI_API_KEY:-}" ]]; then
+	pi_args+=(--api-key "$PI_API_KEY") # cloud key stays a runtime flag, never persisted
+fi
+
+transcript="$(mktemp -t pi-mlx-XXXX)"
+trap 'rm -f "$transcript"' EXIT
+
+# Run the real pi agent. It edits in cwd and/or prints the program; capture both.
+set +e
+printf '%s\n' "$full_prompt" | timeout "$timeout_s" "$pi_bin" "${pi_args[@]}" >"$transcript" 2>&1
+pi_rc=$?
+set -e
+
+[[ -n "${PI_DEBUG:-}" ]] && cp -f "$transcript" ./pi-mlx-transcript.txt
+
+# The frozen baseline candidate the loop seeds (an honest-whiff sentinel). A gen
+# whose candidate.go md5 equals this was NOT edited by pi — it is the seed scoring
+# itself, never a pi win, no matter what verdict the oracle assigns.
+baseline_md5="29d9237c320e7e5dc3193072136cd11f"
+
+# emit_meta route exit_code: write pi_meta.json in cwd so the capture (and anyone
+# auditing) sees, per gen, whether pi actually changed candidate.go — the same
+# wrote_candidate/md5 signal nebius_meta.json carries. Honesty is in the artifact.
+emit_meta() {
+	local route="$1" rc="$2" cur="" wrote="false" isbase="true"
+	[[ -f candidate.go ]] && cur="$(md5of candidate.go)"
+	[[ -n "$cur" && "$cur" != "$before" ]] && wrote="true"
+	[[ "$cur" != "$baseline_md5" ]] && isbase="false"
+	cat >pi_meta.json <<JSON
+{
+  "provider": "$provider",
+  "model": "$model",
+  "route": "$route",
+  "wrote_candidate": $wrote,
+  "candidate_md5": "$cur",
+  "baseline_md5": "$baseline_md5",
+  "is_baseline_whiff": $([[ "$isbase" == "true" ]] && echo true || echo false),
+  "pi_rc": $rc
+}
+JSON
+}
+
+after=""
+[[ -f candidate.go ]] && after="$(md5of candidate.go)"
+
+# If the agent's tools already rewrote candidate.go (md5 changed), trust that.
+if [[ -n "$after" && "$after" != "$before" ]]; then
+	echo "pi-mlx: candidate.go rewritten by agent tools (provider=$provider model=$model rc=$pi_rc)" >&2
+	emit_meta "tool-write" "$pi_rc"
+	exit 0
+fi
+
+# Route (b): recover the program from the transcript. Small local models emit the
+# program three ways, in order of preference: (1) a write-tool JSON blob whose
+# .arguments.content is the JSON-escaped Go file, (2) a ```go fence, (3) a generic
+# ``` fence. The extractor returns only output that begins with `package main`, so
+# a recovered JSON wrapper or prose never lands as candidate.go.
+extracted="$(
+	PI_MLX_TRANSCRIPT="$transcript" python3 - <<'PY' || true
+import json, os, re, sys
+
+text = open(os.environ["PI_MLX_TRANSCRIPT"], "r", errors="replace").read()
+
+def valid(go):
+    # Must look like the program, and must not be the degenerate looping output a
+    # weak model emits (hundreds of near-duplicate import lines). Reject if any
+    # single line repeats more than 8 times — that is a generation loop, not code.
+    if not go or not go.lstrip().startswith("package main"):
+        return None
+    from collections import Counter
+    lines = [ln.strip() for ln in go.splitlines() if ln.strip()]
+    if lines and Counter(lines).most_common(1)[0][1] > 8:
+        return None
+    return go
+
+# (1) a write/edit tool-call JSON blob: pull .arguments.content (handles the
+# escaped-Go-in-JSON pattern the 1.5B/3B coder models produce).
+for m in re.finditer(r'\{.*?"name"\s*:\s*"(?:write|edit|create_file)".*?\}', text, re.DOTALL):
+    blob = m.group(0)
+    # Trim to a balanced object so json.loads succeeds even with trailing text.
+    depth = 0
+    for i, ch in enumerate(blob):
+        if ch == "{": depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                blob = blob[:i+1]; break
+    try:
+        obj = json.loads(blob)
+    except Exception:
+        continue
+    args = obj.get("arguments") or obj.get("parameters") or {}
+    content = args.get("content") or args.get("new_content") or args.get("text")
+    if valid(content):
+        sys.stdout.write(content); sys.exit(0)
+
+# (2)/(3) a fenced code block: prefer ```go, else the first ``` fence.
+fences = re.findall(r'```(?:go)?[ \t]*\n(.*?)\n```', text, re.DOTALL)
+for body in fences:
+    if valid(body):
+        sys.stdout.write(body); sys.exit(0)
+
+sys.exit(1)  # nothing recoverable
+PY
+)"
+
+if [[ -z "$extracted" ]]; then
+	echo "pi-mlx: WHIFF — pi produced no candidate.go and no recoverable package main (rc=$pi_rc, provider=$provider model=$model)" >&2
+	echo "pi-mlx: leaving candidate.go at the baseline so the loop continues; this gen's candidate.go md5 will equal the baseline — the md5 audit flags it as a whiff, NOT a win." >&2
+	# Exit 0 so the orchestrator scores the unchanged candidate and proceeds to the
+	# next generation (a hard error aborts the whole run). Honesty is enforced by the
+	# per-gen md5(candidate vs baseline) audit (pi_meta.json + the capture), not by
+	# the exit code: a baseline-md5 gen is a whiff even if the oracle marks it PASS.
+	emit_meta "whiff" "$pi_rc"
+	exit 0
+fi
+
+printf '%s\n' "$extracted" >candidate.go
+echo "pi-mlx: candidate.go recovered from pi transcript (route b: extract; provider=$provider model=$model rc=$pi_rc)" >&2
+emit_meta "extract" "$pi_rc"
+exit 0

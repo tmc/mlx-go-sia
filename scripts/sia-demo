@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# sia-demo — the on-stage demo driver. One script the presenter drives to replay
+# each beat of the SIA hackathon demo cleanly, without fumbling between terminals.
+#
+# Each beat either cats a captured artifact (.txt/.md) or runs a live demo. Beats
+# are robust: a missing artifact prints a clear "artifact not found" line and a
+# hint, never a crash, so a half-staged laptop still walks the runsheet.
+#
+# Usage:
+#   sia-demo <beat>        replay one beat
+#   sia-demo all           walk every beat in runsheet order, pausing between each
+#   sia-demo list          list the beats
+#
+# Beats:
+#   p7        P7 metal kernel — 40.8x hero spread + gen_4 compile-reject card  (OPENER/HERO)
+#   p1        P1 paperbench  — honest 0.45->1.00 climb, blockers clearing      (TRUST MODEL)
+#   p3        P3 inferopt    — flat-pi(1.0x) vs scripted-win(1.45x), same gate (CLIMAX)
+#   p6        P6 weight-loop — real LoRA, held-out test_loss catches overfit   (WEIGHT CLIMAX)
+#   leak      LIVE leakguard 3-act — held-out is structurally unreachable      (DEFENSE)
+#   offline   LIVE pi-mlx offline proof — network off, model from local disk   (NEGATIVE CTRL)
+#
+# In 'all', each beat pauses for ENTER before the next (set SIA_DEMO_NOPAUSE=1 to
+# disable, e.g. for a dry-run / CI capture).
+
+set -uo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$here/.." && pwd)"
+samples="${SIA_DEMO_SAMPLES:-/tmp/siachart-samples}"
+artifacts="${SIA_DEMO_ARTIFACTS:-/tmp}"
+
+# ── presentation helpers ──────────────────────────────────────────────────────
+if [ -t 1 ]; then
+	bold=$(printf '\033[1m'); dim=$(printf '\033[2m'); reset=$(printf '\033[0m')
+	cyan=$(printf '\033[36m'); yellow=$(printf '\033[33m')
+else
+	bold=""; dim=""; reset=""; cyan=""; yellow=""
+fi
+
+rule() { printf '%s%s%s\n' "$dim" "──────────────────────────────────────────────────────────────────────────" "$reset"; }
+
+beat_banner() { # beat_banner <tag> <title>
+	printf '\n%s%s  BEAT %s  —  %s%s\n' "$bold" "$cyan" "$1" "$2" "$reset"
+	rule
+}
+
+# show_file <path> [<path2> ...] — cat each existing file; warn (don't crash) on miss.
+show_file() {
+	local shown=0 f
+	for f in "$@"; do
+		if [ -f "$f" ]; then
+			cat "$f"
+			printf '%s' "$reset"
+			shown=1
+		else
+			printf '%s  [artifact not found: %s]%s\n' "$yellow" "$f" "$reset"
+		fi
+	done
+	if [ "$shown" -eq 0 ]; then
+		printf '%s  → no artifact for this beat is staged. Recapture, or run the live demo.%s\n' "$yellow" "$reset"
+		return 1
+	fi
+	return 0
+}
+
+# run_live <label> <cmd...> — run a live demo from the repo root, robust on failure.
+run_live() {
+	local label="$1"; shift
+	if ! command -v "$1" >/dev/null 2>&1 && [ ! -x "$1" ]; then
+		printf '%s  [live demo unavailable: %s not found]%s\n' "$yellow" "$1" "$reset"
+		return 1
+	fi
+	printf '%s  ▶ live: %s%s\n\n' "$dim" "$label" "$reset"
+	( cd "$repo" && "$@" )
+	local rc=$?
+	if [ "$rc" -ne 0 ]; then
+		printf '\n%s  [live demo exited %d — see output above]%s\n' "$yellow" "$rc" "$reset"
+	fi
+	return "$rc"
+}
+
+pause() {
+	[ "${SIA_DEMO_NOPAUSE:-0}" = "1" ] && return 0
+	[ -t 0 ] || return 0
+	printf '\n%s  ── press ENTER for the next beat ──%s' "$dim" "$reset"
+	read -r _ || true
+	printf '\n'
+}
+
+# ── beats ─────────────────────────────────────────────────────────────────────
+beat_p7() {
+	beat_banner p7 "P7 metal kernel — 40.8x hero + gen_4 compile-reject (OPENER)"
+	show_file "$samples/p7-live-spread-terminal.txt"
+	printf '\n%s  ── and the honesty punchline: a faster-but-broken kernel earns nothing ──%s\n\n' "$dim" "$reset"
+	show_file "$artifacts/p7-gen4-card.md"
+}
+
+beat_p1() {
+	beat_banner p1 "P1 paperbench — honest 0.45->1.00, blockers clearing (TRUST MODEL)"
+	# Prefer the rendered terminal capture; fall back to the markdown.
+	if [ -f "$artifacts/paperbench-hero/terminal.txt" ]; then
+		show_file "$artifacts/paperbench-hero/terminal.txt"
+	else
+		show_file "$artifacts/paperbench-hero/p1-paperbench-capture.md"
+	fi
+}
+
+beat_p3() {
+	beat_banner p3 "P3 inferopt — flat-pi(1.0x) vs scripted-win(1.45x), same gate (CLIMAX)"
+	printf '%s  pi-1B (run_1): real, FLAT ~1.0x — every gen PASSES the oracle (gate != rubber stamp)%s\n\n' "$dim" "$reset"
+	show_file "$samples/p3-flat-pi-terminal.txt"
+	printf '\n%s  scripted (run_3): real, CLEAN ~1.45x — md5-proven rewrite, all gens PASS the exact-token oracle%s\n\n' "$dim" "$reset"
+	show_file "$samples/p3-scripted-win-terminal.txt"
+	printf '\n%s  Same loop, same ungameable gate. Capability sets the LEVEL; the gate can'\''t be fooled.%s\n' "$dim" "$reset"
+}
+
+beat_p6() {
+	beat_banner p6 "P6 weight-loop — real LoRA, held-out test_loss catches overfit (WEIGHT CLIMAX)"
+	show_file "$samples/p6-weightloop-hero-terminal.txt"
+	printf '\n%s  Same model, weights changing each gen, scored on data the agent never sees.%s\n' "$dim" "$reset"
+	printf '%s  The agent got greedy and overfit — the held-out gate caught it and refused the regression.%s\n' "$dim" "$reset"
+}
+
+beat_leak() {
+	beat_banner leak "LIVE leakguard 3-act — held-out is structurally unreachable (DEFENSE)"
+	run_live "go run ./cmd/leakguard-demo" go run ./cmd/leakguard-demo
+}
+
+beat_offline() {
+	beat_banner offline "LIVE pi-mlx offline proof — network off, model from local disk (NEGATIVE CTRL)"
+	run_live "scripts/pi-mlx-offline-proof" "$here/pi-mlx-offline-proof"
+}
+
+# Runsheet order (notebook-arbitrated): hero -> trust -> climax -> weight climax -> defense -> ctrl.
+ALL_BEATS="p7 p1 p3 p6 leak offline"
+
+beat_all() {
+	# shellcheck disable=SC2086 # ALL_BEATS is a fixed space-separated word list
+	set -- $ALL_BEATS
+	printf '%s%sSIA demo — walking %d beats in runsheet order%s\n' "$bold" "$cyan" "$#" "$reset"
+	printf '%s  thesis: a meta-agent rewrites a target agent against a frozen, external verifier —%s\n' "$dim" "$reset"
+	printf '%s          performance climbs HONESTLY and scales with the meta-agent, no Goodhart.%s\n' "$dim" "$reset"
+	local b
+	for b in $ALL_BEATS; do
+		"beat_$b"
+		pause
+	done
+	printf '\n%s%s  end of runsheet.%s\n' "$bold" "$cyan" "$reset"
+}
+
+usage() {
+	sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+main() {
+	local beat="${1:-}"
+	case "$beat" in
+		p7|p1|p3|p6|leak|offline) "beat_$beat" ;;
+		all)                      beat_all ;;
+		list|"")                  usage ;;
+		-h|--help|help)           usage ;;
+		*)
+			printf '%ssia-demo: unknown beat %q%s\n\n' "$yellow" "$beat" "$reset" >&2
+			usage >&2
+			exit 2
+			;;
+	esac
+}
+
+main "$@"

@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# pi-nebius-agent — the SIA meta/feedback engine driving the REAL pi coding agent
+# against Nebius Token Factory (a cloud OpenAI-compatible provider). It is a thin
+# sibling of scripts/pi-mlx for the Nebius backend, kept separate only because the
+# Nebius-served DeepSeek-V3.2 model needs two adaptations the local-MLX path does
+# not:
+#
+#   1. JSON output channel. In pi text mode (-p) this model returns 0 bytes on the
+#      heavy SIA prompt: it emits the program in its reasoning/thinking channel,
+#      not as final text. So we run pi with --mode json and recover the Go program
+#      from the assistant message's thinking OR text content. (The local 1.5B coder
+#      returns visible text, so pi-mlx's text channel works for it; this model does
+#      not, so we read the structured stream instead.)
+#   2. A highest-priority trailing OVERRIDE block. The stock SIA meta-prompt is
+#      ~300 lines steering the model to write a Python target_agent.py; appended at
+#      the tail of the user turn (recency dominates) the override flips the model to
+#      emit a single raw Go candidate.go whose first line is `package main`.
+#
+# Either way this is the REAL pi agent talking to Nebius: pi owns the conversation
+# and the model produces the candidate; the wrapper extracts it to disk. The
+# candidate then faces the unchanged exact-token oracle — the wrapper cannot widen
+# the gate.
+#
+# Contract (identical to scripts/pi-mlx / the ExecRunner seam): read the task
+# prompt on stdin, run in the generation's WorkingDir, leave an improved
+# candidate.go there, exit 0 on success. Exit 3 is an honest whiff (no recoverable
+# package main) so inferopt records an engine miss, never a silent pass.
+#
+# Environment:
+#   PI_PROVIDER  pi provider name in ~/.pi/agent/models.json (default: nebius)
+#   PI_MODEL     model id                                    (default: deepseek-ai/DeepSeek-V3.2-fast)
+#   PI_API_KEY   api key, passed as `pi --api-key` at runtime; cloud keys stay env-only, never in models.json
+#   PI_BIN       path to the pi CLI                          (default: the nvm install)
+#   PI_TIMEOUT   seconds before the pi call is killed        (default: 300)
+#   PI_DEBUG     if set, keep the raw pi JSON stream at ./pi-nebius-transcript.json
+set -euo pipefail
+
+provider="${PI_PROVIDER:-nebius}"
+model="${PI_MODEL:-deepseek-ai/DeepSeek-V3.2-fast}"
+pi_bin="${PI_BIN:-/Users/tmc/.nvm/versions/node/v20.19.6/bin/pi}"
+timeout_s="${PI_TIMEOUT:-300}"
+
+prompt="$(cat)" # ExecRunner writes the SIA task prompt to stdin.
+
+# Highest-priority trailing override: flip the model off the Python target_agent.py
+# boilerplate and onto a single raw Go candidate.go. Appended at the tail of the
+# user turn so recency dominates the upstream boilerplate.
+read -r -d '' override <<'OVR' || true
+
+=== OVERRIDE — HIGHEST PRIORITY. The instructions below supersede everything above. ===
+Disregard ALL instructions above about writing a Python target_agent.py, about
+--dataset_dir/--working_dir, about agent_execution logging, or about an improvement.md.
+Those are boilerplate from a different task type and DO NOT APPLY here.
+
+Your ENTIRE response must be the raw contents of a single Go file named candidate.go:
+- The FIRST line of your response must be exactly: package main
+- No markdown fences. No Python. No prose, analysis, or explanation. Go source only.
+- Keep it a standalone stdlib `go run candidate.go` program: read fixtures JSON on
+  stdin; with -mode=tokens print one token id per line; with -mode=bench print one
+  line `tokens_per_sec <float>`. Reproduce the sampler algorithm + splitMix64 RNG
+  bit-for-bit so the emitted tokens are identical; make it FASTER.
+OVR
+
+full_prompt="${prompt}
+${override}"
+
+md5of() { md5 -q "$1" 2>/dev/null || md5sum "$1" | awk '{print $1}'; }
+
+before=""
+[[ -f candidate.go ]] && before="$(md5of candidate.go)"
+
+stream="$(mktemp -t pi-nebius-XXXX)"
+trap 'rm -f "$stream"' EXIT
+
+# Run the real pi agent in JSON mode (no tools: this model returns the program in
+# its content/thinking channel on this prompt, not via tool calls).
+pi_args=(--provider "$provider" --model "$model" --no-session --no-tools --mode json -p)
+if [[ -n "${PI_API_KEY:-}" ]]; then
+	pi_args+=(--api-key "$PI_API_KEY") # cloud key stays a runtime flag, never persisted
+fi
+
+set +e
+printf '%s\n' "$full_prompt" | timeout "$timeout_s" "$pi_bin" "${pi_args[@]}" >"$stream" 2>/dev/null
+pi_rc=$?
+set -e
+
+[[ -n "${PI_DEBUG:-}" ]] && cp -f "$stream" ./pi-nebius-transcript.json
+
+# Recover the Go program from the final assistant message. Prefer text content;
+# fall back to thinking content (DeepSeek-V3.2 stashes the program there). The gate
+# is the same one inferopt enforces downstream: the first `package main` at line
+# start, kept to EOF, trailing fence trimmed.
+extracted="$(
+	PI_NEBIUS_STREAM="$stream" python3 - <<'PY'
+import json, os, re, sys
+
+last = None
+for line in open(os.environ["PI_NEBIUS_STREAM"], "r", errors="replace"):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    if e.get("type") == "message_end" and e.get("message", {}).get("role") == "assistant":
+        last = e["message"]
+
+if not last:
+    sys.exit(1)
+
+# Prefer text blocks, then thinking blocks.
+blocks = []
+for c in last.get("content", []):
+    if c.get("type") == "text":
+        blocks.append(c.get("text", ""))
+for c in last.get("content", []):
+    if c.get("type") == "thinking":
+        blocks.append(c.get("thinking", ""))
+
+def extract(s):
+    m = re.search(r"(?m)^package main\b", s)
+    if not m:
+        return None
+    code = s[m.start():]
+    code = re.sub(r"\n```\s*$", "\n", code)  # trim a trailing fence if present
+    return code
+
+for b in blocks:
+    code = extract(b)
+    if code:
+        sys.stdout.write(code if code.endswith("\n") else code + "\n")
+        sys.exit(0)
+
+sys.exit(1)  # nothing recoverable
+PY
+)"
+
+if [[ -z "$extracted" ]]; then
+	echo "pi-nebius-agent: pi produced no recoverable package main (rc=$pi_rc, provider=$provider model=$model)" >&2
+	echo "pi-nebius-agent: leaving candidate.go unchanged (the oracle scores the seed — an honest whiff, not a win)" >&2
+	exit 3
+fi
+
+printf '%s' "$extracted" >candidate.go
+after="$(md5of candidate.go)"
+if [[ "$after" == "$before" ]]; then
+	echo "pi-nebius-agent: candidate.go unchanged vs seed (md5 $after) — whiff, not a win" >&2
+	exit 3
+fi
+echo "pi-nebius-agent: candidate.go recovered from pi/Nebius output (provider=$provider model=$model rc=$pi_rc md5=$after)" >&2
+exit 0
