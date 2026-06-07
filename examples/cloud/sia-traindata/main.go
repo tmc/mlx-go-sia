@@ -27,8 +27,8 @@ import (
 
 	"github.com/tmc/mlx-go-experiments/renderer"
 	"github.com/tmc/mlx-go-lm/mlxlm"
-	sia "github.com/tmc/sia-apple-silicon"
-	"github.com/tmc/sia-apple-silicon/traindata"
+	sia "github.com/tmc/mlx-go-sia"
+	"github.com/tmc/mlx-go-sia/traindata"
 )
 
 func main() {

@@ -32,7 +32,7 @@ import (
 	"fmt"
 	"log"
 
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 	"github.com/tmc/mlx-go-lm/mlxlm"
 	"github.com/tmc/mlx-go-lm/mlxlm/llm/models"
 	rl "github.com/tmc/mlx-go/examples/mlx-go-rl"

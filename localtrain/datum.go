@@ -2,7 +2,7 @@ package localtrain
 
 import (
 	"github.com/tmc/localtinker/tinker"
-	"github.com/tmc/sia-apple-silicon/traindata"
+	"github.com/tmc/mlx-go-sia/traindata"
 )
 
 // DatumFromSample maps a rendered SIA training sample onto the Tinker

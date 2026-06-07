@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 )
 
 // WeightsEvaluator scores a weights-mode generation on a HELD-OUT test set the

@@ -24,7 +24,7 @@ import (
 	"os"
 	"strings"
 
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 )
 
 func main() {

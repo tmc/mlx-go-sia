@@ -1,4 +1,4 @@
-module github.com/tmc/sia-apple-silicon
+module github.com/tmc/mlx-go-sia
 
 go 1.26.3
 

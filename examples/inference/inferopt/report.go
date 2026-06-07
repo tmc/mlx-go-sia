@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 )
 
 // genResults is the subset of each generation's results.json this command prints

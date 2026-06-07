@@ -36,7 +36,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/tmc/sia-apple-silicon/examples/inference/siachart/internal/chartdata"
+	"github.com/tmc/mlx-go-sia/examples/inference/siachart/internal/chartdata"
 )
 
 func main() {

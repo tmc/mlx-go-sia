@@ -8,7 +8,7 @@
 // equivalent rendered samples (see package traindata) and runs the same
 // CreateLoRA → ForwardBackward → OptimStep → Save loop locally on MLX.
 //
-// [DatumFromSample] maps a [github.com/tmc/sia-apple-silicon/traindata.TrainingSample]
+// [DatumFromSample] maps a [github.com/tmc/mlx-go-sia/traindata.TrainingSample]
 // onto the Tinker training contract: the rendered token stream is the model
 // input, its next-token shift is the cross-entropy target, and the loss mask
 // becomes per-token weights. [Train] runs the loop against a [tinker.Client].

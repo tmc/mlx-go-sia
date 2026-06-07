@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 )
 
 // demoBench is a stand-in Benchmarker: it reports the candidate as correct and

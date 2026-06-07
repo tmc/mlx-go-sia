@@ -51,7 +51,7 @@ import (
 
 func init() { runtime.LockOSThread() }
 
-const defaultRunsRoot = "/Users/tmc/go/src/github.com/tmc/sia-apple-silicon/runs-localtrain"
+const defaultRunsRoot = "/Users/tmc/go/src/github.com/tmc/mlx-go-sia/runs-localtrain"
 
 // Palette, matching the charts example house style.
 var (

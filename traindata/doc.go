@@ -7,7 +7,7 @@
 // prompt as text (see package sia). In weights mode the reference only emits a
 // prompt instructing the generated train.py to build a renderer with
 // tinker_cookbook. This package provides the same capability natively and
-// post-hoc, converting a recorded [github.com/tmc/sia-apple-silicon.Execution] into
+// post-hoc, converting a recorded [github.com/tmc/mlx-go-sia.Execution] into
 // [TrainingSample] values via a [github.com/tmc/mlx-go-experiments/renderer.Renderer].
 //
 // The package is intentionally separate from package sia so the faithful

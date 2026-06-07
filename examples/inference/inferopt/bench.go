@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	sia "github.com/tmc/sia-apple-silicon"
-	"github.com/tmc/sia-apple-silicon/examples/inference/inferopt/internal/oracle"
+	sia "github.com/tmc/mlx-go-sia"
+	"github.com/tmc/mlx-go-sia/examples/inference/inferopt/internal/oracle"
 )
 
 // candidateFile is the single Go source the agent edits each generation. It is a

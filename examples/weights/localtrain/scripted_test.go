@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 )
 
 // TestSpecLadderWritesPerGenSpec verifies the ladder writes a distinct, valid

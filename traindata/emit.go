@@ -8,7 +8,7 @@ import (
 	"io"
 
 	"github.com/tmc/mlx-go-experiments/renderer"
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 )
 
 // TrainingSample is one rendered trajectory ready for token-level training.

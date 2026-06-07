@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 )
 
 // demoValidator accepts a JSONL fixture iff every row carries all five required

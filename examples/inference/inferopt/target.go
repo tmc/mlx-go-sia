@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	sia "github.com/tmc/sia-apple-silicon"
-	"github.com/tmc/sia-apple-silicon/examples/inference/inferopt/internal/seed"
+	sia "github.com/tmc/mlx-go-sia"
+	"github.com/tmc/mlx-go-sia/examples/inference/inferopt/internal/seed"
 )
 
 // samplerTarget is the P3 [sia.TargetExecutor]. In this demo the "target" the

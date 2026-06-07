@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 )
 
 // seedingTarget wraps a [sia.TargetExecutor] and seeds the generation's train.py

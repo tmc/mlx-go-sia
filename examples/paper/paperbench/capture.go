@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 )
 
 // evidenceKeys is the fixed display order for the seven coverage-map evidence

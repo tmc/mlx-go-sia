@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	sia "github.com/tmc/sia-apple-silicon"
+	sia "github.com/tmc/mlx-go-sia"
 )
 
 // dataset is a tiny, deterministic instruction→response set for the narrow demo

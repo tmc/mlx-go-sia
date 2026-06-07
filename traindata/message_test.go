@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/tmc/mlx-go-experiments/renderer"
-	"github.com/tmc/sia-apple-silicon/traindata"
+	"github.com/tmc/mlx-go-sia/traindata"
 )
 
 func TestMessagesFromTrajectory(t *testing.T) {

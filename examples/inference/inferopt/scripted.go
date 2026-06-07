@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	sia "github.com/tmc/sia-apple-silicon"
-	"github.com/tmc/sia-apple-silicon/examples/inference/inferopt/internal/seed"
+	sia "github.com/tmc/mlx-go-sia"
+	"github.com/tmc/mlx-go-sia/examples/inference/inferopt/internal/seed"
 )
 
 // scriptedImprover is a deterministic meta engine that stands in for an LLM when
