@@ -137,6 +137,7 @@ func ParseTargetAgentProfile(data []byte, source, baseDir string, providers Prov
 var DefaultMetaProfiles = map[string]string{
 	"default-meta":     `{"profile_id":"default-meta","name":"Default meta agent (Claude Haiku)","agent_impl":"claude","model":"haiku","provider_id":"anthropic"}`,
 	"kimi-nebius-meta": `{"profile_id":"kimi-nebius-meta","name":"Kimi K2.6 on Nebius","agent_impl":"openhands","model":"moonshotai/Kimi-K2.6","provider_id":"nebius"}`,
+	"gemini-meta":      `{"profile_id":"gemini-meta","name":"Gemini 3.1 Pro meta agent (OpenHands)","agent_impl":"openhands","model":"gemini/gemini-3.1-pro-preview","provider_id":"gemini"}`,
 }
 
 var DefaultTargetProfiles = map[string]string{
@@ -144,4 +145,6 @@ var DefaultTargetProfiles = map[string]string{
 	"gptoss-nebius-target": `{"profile_id":"gptoss-nebius-target","name":"GPT OSS 120B on Nebius","model":"openai/gpt-oss-120b-fast","provider_id":"nebius","agent_reference":"default"}`,
 	"kimi-nebius-target":   `{"profile_id":"kimi-nebius-target","name":"Kimi K2.6 on Nebius","model":"moonshotai/Kimi-K2.6","provider_id":"nebius","agent_reference":"default"}`,
 	"qwen-nebius-target":   `{"profile_id":"qwen-nebius-target","name":"Qwen 80B on Nebius","model":"Qwen/Qwen3-Next-80B-A3B-Thinking-fast","provider_id":"nebius","agent_reference":"default"}`,
+	"gptoss-tinker-target": `{"profile_id":"gptoss-tinker","name":"GPT OSS 120B on Tinker","model":"openai/gpt-oss-120b","provider_id":"tinker","agent_reference":"default"}`,
+	"qwen3-tinker-target":  `{"profile_id":"qwen3-tinker","name":"Qwen3 4B Instruct on Tinker","model":"Qwen/Qwen3-4B-Instruct-2507","provider_id":"tinker","agent_reference":"default"}`,
 }

@@ -58,4 +58,5 @@ var DefaultProviders = map[string]Provider{
 	"openai":    {ProviderID: "openai", Name: "OpenAI", ClientKind: ClientOpenAI, BaseURL: "https://api.openai.com/v1", APIKeyEnv: "OPENAI_API_KEY"},
 	"nebius":    {ProviderID: "nebius", Name: "Nebius Token Factory", ClientKind: ClientOpenAI, BaseURL: "https://api.tokenfactory.us-central1.nebius.com/v1/", APIKeyEnv: "NEBIUS_API_KEY"},
 	"together":  {ProviderID: "together", Name: "Together AI", ClientKind: ClientOpenAI, BaseURL: "https://api.together.ai/v1", APIKeyEnv: "TOGETHER_API_KEY"},
+	"tinker":    {ProviderID: "tinker", Name: "Tinker API", ClientKind: ClientOpenAI, BaseURL: "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1", APIKeyEnv: "TINKER_API_KEY"},
 }
