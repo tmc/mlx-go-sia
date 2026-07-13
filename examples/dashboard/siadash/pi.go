@@ -125,7 +125,7 @@ func pollPi(ctx context.Context, dir string) PiSnapshot {
 
 // buildFeed reads raw entries from the most-recently-ended sessions and reduces
 // them to feed rows, newest last, capped at maxFeedRows. It re-reads via
-// cc.ReadPiFile so the feed reflects entry-level activity (the collector's
+// cc.ReadFile so the feed reflects entry-level activity (the collector's
 // cass.Message view drops tool-only and non-message entries we want to show).
 func buildFeed(ctx context.Context, sessions []cass.Session) []PiEntry {
 	// Newest session first so we tail the freshest activity.
@@ -136,7 +136,7 @@ func buildFeed(ctx context.Context, sessions []cass.Session) []PiEntry {
 
 	var rows []PiEntry
 	for _, s := range ordered {
-		entries, err := cc.ReadPiFile(ctx, s.SourcePath)
+		entries, err := cc.ReadFile(ctx, s.SourcePath)
 		if err != nil {
 			continue
 		}
